@@ -906,7 +906,7 @@ def parse_context_limit_from_error(error_msg: str) -> Optional[int]:
     # Pattern: look for numbers near context-related keywords
     patterns = [
         r'(?:max(?:imum)?|limit)\s*(?:context\s*)?(?:length|size|window)?\s*(?:is|of|:)?\s*(\d{4,})',
-        r'context\s*(?:length|size|window)\s*(?:is|of|:)?\s*(\d{4,})',
+        r'context\s*(?:length|size|window)\s*(?:is|of|:)?\s*[\(\[]?\s*(\d{4,})',
         r'(\d{4,})\s*(?:token)?\s*(?:context|limit)',
         r'>\s*(\d{4,})\s*(?:max|limit|token)',  # "250000 tokens > 200000 maximum"
         r'(\d{4,})\s*(?:max(?:imum)?)\b',  # "200000 maximum"
@@ -1513,8 +1513,18 @@ def get_model_context_length(
     7. Hardcoded defaults (broad family patterns, longest-key-first)
     8. Local server query (last resort)
     9. Default fallback (256K)"""
-    # 0. Explicit config override — user knows best
+    model_for_endpoint = _strip_provider_prefix(model)
+
+    # 0. Explicit config override. For reloadable local endpoints, the live
+    # server allocation is still authoritative because llama.cpp/Ollama/LM
+    # Studio can serve less context than the model's training window or config.
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
+        if base_url and is_local_endpoint(base_url):
+            live_ctx = _resolve_endpoint_context_length(model_for_endpoint, base_url, api_key=api_key)
+            if live_ctx is None:
+                live_ctx = _query_local_context_length(model_for_endpoint, base_url, api_key=api_key)
+            if isinstance(live_ctx, int) and live_ctx > 0:
+                return min(config_context_length, live_ctx)
         return config_context_length
 
     # 0b. custom_providers per-model override — check before any probe.
@@ -1537,7 +1547,7 @@ def get_model_context_length(
     # Normalise provider-prefixed model names (e.g. "local:model-name" →
     # "model-name") so cache lookups and server queries use the bare ID that
     # local servers actually know about.  Ollama "model:tag" colons are preserved.
-    model = _strip_provider_prefix(model)
+    model = model_for_endpoint
 
     # 1. Check persistent cache (model+provider)
     # LM Studio is excluded — its loaded context length is transient (the

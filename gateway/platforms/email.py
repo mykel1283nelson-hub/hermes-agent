@@ -182,6 +182,53 @@ def _extract_email_address(raw: str) -> str:
     return raw.strip().lower()
 
 
+def _normalize_imap_uid(value: Any) -> Optional[bytes]:
+    """Normalize IMAP UID values to the bytes shape imaplib expects.
+
+    Most servers return UID search results as a space-delimited bytes blob,
+    but some IMAP implementations can surface individual values as strings or
+    integers through imaplib. Keeping one canonical representation prevents the
+    poller from mixing bytes/str/int in the seen set and from handing an int to
+    imaplib internals that expect bytes-like arguments.
+    """
+    if isinstance(value, bytes):
+        uid = value.strip()
+    elif isinstance(value, bytearray):
+        uid = bytes(value).strip()
+    elif isinstance(value, int):
+        uid = str(value).encode("ascii")
+    elif isinstance(value, str):
+        uid = value.strip().encode("ascii", errors="ignore")
+    else:
+        return None
+    return uid or None
+
+
+def _split_imap_uids(data: Any) -> List[bytes]:
+    """Return normalized UID bytes from an imaplib SEARCH response."""
+    if not data:
+        return []
+    values: List[Any]
+    if isinstance(data, (list, tuple)):
+        values = list(data)
+    else:
+        values = [data]
+
+    uids: List[bytes] = []
+    for item in values:
+        if item is None:
+            continue
+        if isinstance(item, (bytes, bytearray, str)):
+            raw_parts = item.split()
+        else:
+            raw_parts = [item]
+        for part in raw_parts:
+            uid = _normalize_imap_uid(part)
+            if uid is not None:
+                uids.append(uid)
+    return uids
+
+
 def _extract_attachments(
     msg: email_lib.message.Message,
     skip_attachments: bool = False,
@@ -303,8 +350,8 @@ class EmailAdapter(BasePlatformAdapter):
             # Mark all existing messages as seen so we only process new ones
             imap.select("INBOX")
             status, data = imap.uid("search", None, "ALL")
-            if status == "OK" and data and data[0]:
-                for uid in data[0].split():
+            if status == "OK" and data:
+                for uid in _split_imap_uids(data):
                     self._seen_uids.add(uid)
             # Keep only the most recent UIDs to prevent unbounded growth
             self._trim_seen_uids()
@@ -372,10 +419,10 @@ class EmailAdapter(BasePlatformAdapter):
                 imap.select("INBOX")
 
                 status, data = imap.uid("search", None, "UNSEEN")
-                if status != "OK" or not data or not data[0]:
+                if status != "OK" or not data:
                     return results
 
-                for uid in data[0].split():
+                for uid in _split_imap_uids(data):
                     if uid in self._seen_uids:
                         continue
                     self._seen_uids.add(uid)
@@ -409,7 +456,7 @@ class EmailAdapter(BasePlatformAdapter):
                     attachments = _extract_attachments(msg, skip_attachments=self._skip_attachments)
 
                     results.append({
-                        "uid": uid,
+                        "uid": uid.decode("ascii", errors="replace"),
                         "sender_addr": sender_addr,
                         "sender_name": sender_name,
                         "subject": subject,
@@ -425,7 +472,7 @@ class EmailAdapter(BasePlatformAdapter):
                 except Exception:
                     pass
         except Exception as e:
-            logger.error("[Email] IMAP fetch error: %s", e)
+            logger.error("[Email] IMAP fetch error: %s", e, exc_info=True)
         return results
 
     async def _dispatch_message(self, msg_data: Dict[str, Any]) -> None:

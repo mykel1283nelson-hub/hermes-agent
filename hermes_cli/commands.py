@@ -125,6 +125,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("model", "Switch model for this session", "Configuration",
                args_hint="[model] [--provider name] [--global] [--refresh]"),
+    CommandDef("modelroute", "Dispatch one prompt through the selected local model route",
+               "Configuration", gateway_only=True, args_hint="<task_class> <message>"),
     CommandDef("codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models",
                "Configuration", aliases=("codex_runtime",),
                args_hint="[auto|codex_app_server]"),

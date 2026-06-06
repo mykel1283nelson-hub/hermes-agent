@@ -29,9 +29,12 @@ Usage:
 """
 
 import base64
+import asyncio
 import json
 import logging
 import os
+import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
@@ -72,6 +75,88 @@ _VISION_DOWNLOAD_TIMEOUT = _resolve_download_timeout()
 # Hard cap on downloaded image file size (50 MB). Prevents OOM from
 # attacker-hosted multi-gigabyte files or decompression bombs.
 _VISION_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _local_vision_cli_config() -> Optional[Dict[str, Any]]:
+    """Return local CLI vision settings when the aux vision route requires it.
+
+    The GodMode trusted router advertises Qwen3-VL through a specialized
+    ``local_vision_cli`` adapter. That route intentionally rejects OpenAI-style
+    chat-completions image payloads, so Hermes must call the CLI directly.
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        cfg = load_config()
+        vision_cfg = cfg_get(cfg, "auxiliary", "vision", default={}) or {}
+    except Exception:
+        vision_cfg = {}
+
+    model = str(vision_cfg.get("model") or "").strip()
+    base_url = str(vision_cfg.get("base_url") or "").strip()
+    transport = str(vision_cfg.get("transport") or "").strip()
+    endpoint = str(vision_cfg.get("endpoint") or "").strip()
+
+    if not endpoint:
+        endpoint = os.getenv(
+            "GODMODE_VISION_CLI",
+            "/Users/agentmoney/godmode-workspace/scripts/vision/vision_client.py",
+        )
+
+    local_route_requested = (
+        transport == "local_vision_cli"
+        or model == "vision" and base_url.startswith("http://127.0.0.1:8412/")
+        or model == "vision" and base_url.startswith("http://localhost:8412/")
+    )
+    if not local_route_requested:
+        return None
+
+    max_tokens = vision_cfg.get("max_tokens") or os.getenv("GODMODE_VISION_MAX_TOKENS") or 512
+    timeout = vision_cfg.get("timeout") or os.getenv("GODMODE_VISION_TIMEOUT") or 120
+    return {
+        "endpoint": endpoint,
+        "max_tokens": int(max_tokens),
+        "timeout": float(timeout),
+    }
+
+
+async def _run_local_vision_cli(
+    image_path: Path,
+    prompt: str,
+    endpoint: str,
+    max_tokens: int,
+    timeout: float,
+) -> str:
+    endpoint_path = Path(endpoint).expanduser()
+    if not endpoint_path.is_file():
+        raise FileNotFoundError(f"local vision CLI not found: {endpoint_path}")
+
+    argv = [
+        sys.executable,
+        str(endpoint_path),
+        str(image_path),
+        prompt,
+        str(max_tokens),
+    ]
+
+    def _run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            argv,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+
+    completed = await asyncio.to_thread(_run)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(f"local vision CLI failed: {detail[:800]}")
+
+    analysis = completed.stdout.strip()
+    if not analysis:
+        raise RuntimeError("local vision CLI returned empty output")
+    return analysis
 
 
 def _image_url_shape_ok(url: str) -> bool:
@@ -126,6 +211,27 @@ def _detect_image_mime_type(image_path: Path) -> Optional[str]:
         if "<svg" in head:
             return "image/svg+xml"
     return None
+
+
+def _normalized_local_vision_path(image_path: Path, mime_type: str) -> tuple[Path, bool]:
+    """Copy awkward Telegram/Messages paths to a simple CLI-safe temp path."""
+    suffix_by_mime = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/bmp": ".bmp",
+        "image/webp": ".webp",
+        "image/svg+xml": ".svg",
+    }
+    safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-")
+    if all(char in safe_chars for char in str(image_path)):
+        return image_path, False
+
+    temp_dir = get_hermes_dir("cache/vision", "normalized_local_vision")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    normalized = temp_dir / f"vision_{uuid.uuid4().hex}{suffix_by_mime.get(mime_type, image_path.suffix or '.img')}"
+    shutil.copy2(image_path, normalized)
+    return normalized, True
 
 
 def _is_retryable_download_error(error: Exception) -> bool:
@@ -894,6 +1000,45 @@ async def vision_analyze_tool(
         detected_mime_type = _detect_image_mime_type(temp_image_path)
         if not detected_mime_type:
             raise ValueError("Only real image files are supported for vision analysis.")
+
+        # Use the prompt as provided (model_tools.py now handles full description formatting)
+        comprehensive_prompt = user_prompt
+
+        local_vision_cfg = _local_vision_cli_config()
+        if local_vision_cfg is not None:
+            logger.info(
+                "Processing image with local vision CLI adapter: %s",
+                local_vision_cfg["endpoint"],
+            )
+            cli_image_path, cleanup_cli_image = _normalized_local_vision_path(
+                temp_image_path,
+                detected_mime_type,
+            )
+            try:
+                analysis = await _run_local_vision_cli(
+                    cli_image_path,
+                    comprehensive_prompt,
+                    endpoint=local_vision_cfg["endpoint"],
+                    max_tokens=local_vision_cfg["max_tokens"],
+                    timeout=local_vision_cfg["timeout"],
+                )
+            finally:
+                if cleanup_cli_image:
+                    try:
+                        cli_image_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            result = {
+                "success": True,
+                "analysis": analysis,
+                "model_used": "local_vision_cli",
+            }
+            debug_call_data["success"] = True
+            debug_call_data["analysis_length"] = len(analysis)
+            debug_call_data["model_used"] = "local_vision_cli"
+            _debug.log_call("vision_analyze_tool", debug_call_data)
+            _debug.save()
+            return json.dumps(result, indent=2, ensure_ascii=False)
         
         # Convert image to base64 — send at full resolution first.
         # If the provider rejects it as too large, we auto-resize and retry.
@@ -918,9 +1063,6 @@ async def vision_analyze_tool(
                 )
 
         debug_call_data["image_size_bytes"] = image_size_bytes
-        
-        # Use the prompt as provided (model_tools.py now handles full description formatting)
-        comprehensive_prompt = user_prompt
         
         # Prepare the message with base64-encoded image
         messages = [

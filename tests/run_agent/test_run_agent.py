@@ -1367,6 +1367,7 @@ class TestTaskCompletionGuidance:
         agent = self._make_agent(model="anthropic/claude-opus-4.8")
         prompt = agent._build_system_prompt()
         assert TASK_COMPLETION_GUIDANCE in prompt
+        assert "do not call it fixed until the owning process accepts" in prompt
 
     def test_default_injects_for_deepseek(self):
         """And for DeepSeek — the other model that failed the Sarasota

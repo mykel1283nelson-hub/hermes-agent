@@ -834,6 +834,62 @@ class TestGetModelContextLength:
 
         assert result == 65536
 
+    @patch("agent.model_metadata._query_local_context_length")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_local_endpoint_context_caps_config_override(self, mock_endpoint_fetch, mock_local_query):
+        """Local OpenAI-compatible servers can be reloaded below config size.
+
+        llama.cpp exposes the allocated runtime window through /v1/models meta
+        and /props. If Hermes blindly trusts model.context_length, it can build
+        a prompt that the running server rejects.
+        """
+        mock_endpoint_fetch.return_value = {
+            "Qwen3-Coder-Next-Q4_K_M.gguf": {"context_length": 65536}
+        }
+        mock_local_query.return_value = None
+
+        result = get_model_context_length(
+            "Qwen3-Coder-Next-Q4_K_M.gguf",
+            base_url="http://127.0.0.1:8081/v1",
+            api_key="ollama",
+            provider="custom",
+            config_context_length=135168,
+        )
+
+        assert result == 65536
+        mock_local_query.assert_not_called()
+
+    @patch("agent.model_metadata._query_local_context_length")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_local_endpoint_config_can_still_choose_smaller_window(self, mock_endpoint_fetch, mock_local_query):
+        """A smaller explicit local override is still respected as a budget cap."""
+        mock_endpoint_fetch.return_value = {
+            "large-local-model": {"context_length": 131072}
+        }
+        mock_local_query.return_value = None
+
+        result = get_model_context_length(
+            "large-local-model",
+            base_url="http://localhost:8081/v1",
+            provider="custom",
+            config_context_length=65536,
+        )
+
+        assert result == 65536
+        mock_local_query.assert_not_called()
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_llamacpp_context_error_with_parenthesized_limit_is_parsed(self, mock_fetch):
+        mock_fetch.return_value = {}
+        from agent.model_metadata import get_context_length_from_provider_error
+
+        error = (
+            "request (66237 tokens) exceeds the available context size "
+            "(65536 tokens), try increasing it"
+        )
+
+        assert get_context_length_from_provider_error(error, 135168) == 65536
+
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_config_context_length_zero_is_ignored(self, mock_fetch):
         """config_context_length=0 should be treated as unset."""

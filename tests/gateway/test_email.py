@@ -145,6 +145,13 @@ class TestHelperFunctions(unittest.TestCase):
         result = _strip_html(html)
         self.assertIn("a & b", result)
 
+    def test_split_imap_uids_accepts_bytes_str_and_int_shapes(self):
+        from gateway.platforms.email import _split_imap_uids
+
+        result = _split_imap_uids([b"10 11", "12 13", 14, bytearray(b"15")])
+
+        self.assertEqual(result, [b"10", b"11", b"12", b"13", b"14", b"15"])
+
 
 class TestExtractTextBody(unittest.TestCase):
     """Test email body extraction from different message formats."""

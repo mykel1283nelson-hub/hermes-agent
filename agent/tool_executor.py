@@ -356,16 +356,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     for tc, name, args, block_result, blocked_by_guardrail in parsed_calls:
         if block_result is not None:
             continue
-        if agent.tool_progress_callback:
-            try:
-                preview = _build_tool_preview(name, args)
-                agent.tool_progress_callback("tool.started", name, preview, args)
-            except Exception as cb_err:
-                logging.debug(f"Tool progress callback error: {cb_err}")
-
-    for tc, name, args, block_result, blocked_by_guardrail in parsed_calls:
-        if block_result is not None:
-            continue
         if agent.tool_start_callback:
             try:
                 agent.tool_start_callback(tc.id, name, args)
@@ -410,6 +400,15 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             set_activity_callback(agent._touch_activity)
         except Exception:
             pass
+        # Emit tool.started callback now that the tool is actually
+        # beginning execution (not just scheduled). This ensures
+        # "Working..." status only appears when real work starts.
+        if agent.tool_progress_callback:
+            try:
+                preview = _build_tool_preview(function_name, function_args)
+                agent.tool_progress_callback("tool.started", function_name, preview, function_args)
+            except Exception as cb_err:
+                logging.debug(f"Tool progress callback error: {cb_err}")
         # Approval/sudo callbacks (thread-local) and the agent turn's
         # ContextVars are propagated by propagate_context_to_thread() at the
         # submit site below (GHSA-qg5c-hvr5-hjgr, #13617).

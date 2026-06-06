@@ -369,6 +369,65 @@ class TestErrorLoggingExcInfo:
 
 class TestVisionConfig:
     @pytest.mark.asyncio
+    async def test_vision_uses_local_cli_when_configured_for_godmode_vision(self, tmp_path):
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+
+        with (
+            patch(
+                "tools.vision_tools._local_vision_cli_config",
+                return_value={
+                    "endpoint": "/tmp/vision_client.py",
+                    "max_tokens": 2048,
+                    "timeout": 120.0,
+                },
+            ),
+            patch(
+                "tools.vision_tools._run_local_vision_cli",
+                new_callable=AsyncMock,
+                return_value="local qwen vision analysis",
+            ) as mock_local_cli,
+            patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock) as mock_llm,
+        ):
+            result = json.loads(await vision_analyze_tool(str(img), "describe this"))
+
+        assert result["success"] is True
+        assert result["analysis"] == "local qwen vision analysis"
+        assert result["model_used"] == "local_vision_cli"
+        mock_local_cli.assert_awaited_once()
+        mock_llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_local_cli_normalizes_special_character_image_paths(self, tmp_path):
+        img = tmp_path / "Screenshot 2026-05-31 at 4.19.48\u202fPM.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+
+        with (
+            patch(
+                "tools.vision_tools._local_vision_cli_config",
+                return_value={
+                    "endpoint": "/tmp/vision_client.py",
+                    "max_tokens": 2048,
+                    "timeout": 120.0,
+                },
+            ),
+            patch(
+                "tools.vision_tools._run_local_vision_cli",
+                new_callable=AsyncMock,
+                return_value="local qwen vision analysis",
+            ) as mock_local_cli,
+        ):
+            result = json.loads(await vision_analyze_tool(str(img), "describe this"))
+
+        assert result["success"] is True
+        cli_path = mock_local_cli.await_args.args[0]
+        assert cli_path.name.startswith("vision_")
+        assert cli_path.suffix == ".png"
+        assert " " not in str(cli_path)
+        assert "\u202f" not in str(cli_path)
+        assert not cli_path.exists()
+
+    @pytest.mark.asyncio
     async def test_vision_uses_configured_temperature_and_timeout(self, tmp_path):
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
