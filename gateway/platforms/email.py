@@ -434,7 +434,18 @@ class EmailAdapter(BasePlatformAdapter):
                     if status != "OK":
                         continue
 
-                    raw_email = msg_data[0][1]
+                    raw_email = None
+                    for part in msg_data:
+                        if (
+                            isinstance(part, tuple)
+                            and len(part) >= 2
+                            and isinstance(part[1], (bytes, bytearray))
+                        ):
+                            raw_email = bytes(part[1])
+                            break
+                    if raw_email is None:
+                        logger.debug("[Email] Skipping UID %r with malformed fetch response", uid)
+                        continue
                     msg = email_lib.message_from_bytes(raw_email)
 
                     sender_raw = msg.get("From", "")

@@ -902,6 +902,35 @@ class TestFetchNewMessages(unittest.TestCase):
         self.assertEqual(results[0]["sender_addr"], "john@test.com")
         self.assertEqual(results[0]["sender_name"], "John Doe")
 
+    def test_fetch_skips_malformed_fetch_response_parts(self):
+        """IMAP fetch metadata must not be parsed as RFC822 bytes."""
+        adapter = self._make_adapter()
+
+        raw_email = MIMEText("Hello", "plain", "utf-8")
+        raw_email["From"] = "user@test.com"
+        raw_email["Subject"] = "Test"
+        raw_email["Message-ID"] = "<msg@test.com>"
+
+        mock_imap = MagicMock()
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"1 2"])
+            if command == "fetch":
+                uid = args[0]
+                if uid == b"1":
+                    return ("OK", [123, b")"])
+                return ("OK", [(b"2 (RFC822 {10}", raw_email.as_bytes()), b")"])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            results = adapter._fetch_new_messages()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["sender_addr"], "user@test.com")
+
 
 class TestPollLoop(unittest.TestCase):
     """Test the async polling loop."""
