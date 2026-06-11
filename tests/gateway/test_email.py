@@ -847,6 +847,33 @@ class TestFetchNewMessages(unittest.TestCase):
         self.assertEqual(results[0]["sender_addr"], "user@test.com")
         self.assertIn(b"3", adapter._seen_uids)
 
+    def test_fetch_handles_fetch_response_metadata_before_payload(self):
+        """FETCH may include non-tuple metadata before the RFC822 payload."""
+        adapter = self._make_adapter()
+
+        raw_email = MIMEText("Hello", "plain", "utf-8")
+        raw_email["From"] = "user@test.com"
+        raw_email["Subject"] = "Test"
+        raw_email["Message-ID"] = "<msg@test.com>"
+
+        mock_imap = MagicMock()
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"1"])
+            if command == "fetch":
+                return ("OK", [b"FLAGS (\\Seen)", (b"1", raw_email.as_bytes()), b")"])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            results = adapter._fetch_new_messages()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["sender_addr"], "user@test.com")
+        self.assertEqual(results[0]["subject"], "Test")
+
     def test_fetch_no_unseen_messages(self):
         """No unseen messages returns empty list."""
         adapter = self._make_adapter()
