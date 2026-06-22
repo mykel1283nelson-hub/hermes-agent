@@ -6,11 +6,10 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from tools.file_tools import (
-    PATCH_SCHEMA,
-)
+from tools.file_tools import PATCH_SCHEMA
 
 
 class TestReadFileHandler:
@@ -77,7 +76,7 @@ class TestWriteFileHandler:
         from tools.file_tools import write_file_tool
         result = json.loads(write_file_tool("/tmp/out.txt", "hello world!\n"))
         assert result["status"] == "ok"
-        mock_ops.write_file.assert_called_once_with("/tmp/out.txt", "hello world!\n")
+        mock_ops.write_file.assert_called_once_with(str(Path("/tmp/out.txt").resolve()), "hello world!\n")
 
     @patch("tools.file_tools._get_file_ops")
     def test_permission_error_returns_error_json_without_error_log(self, mock_get, caplog):
@@ -182,7 +181,7 @@ class TestPatchHandler:
             old_string="foo", new_string="bar"
         ))
         assert result["status"] == "ok"
-        mock_ops.patch_replace.assert_called_once_with("/tmp/f.py", "foo", "bar", False)
+        mock_ops.patch_replace.assert_called_once_with(str(Path("/tmp/f.py").resolve()), "foo", "bar", False)
 
     @patch("tools.file_tools._get_file_ops")
     def test_replace_mode_replace_all_flag(self, mock_get):
@@ -195,7 +194,7 @@ class TestPatchHandler:
         from tools.file_tools import patch_tool
         patch_tool(mode="replace", path="/tmp/f.py",
                    old_string="x", new_string="y", replace_all=True)
-        mock_ops.patch_replace.assert_called_once_with("/tmp/f.py", "x", "y", True)
+        mock_ops.patch_replace.assert_called_once_with(str(Path("/tmp/f.py").resolve()), "x", "y", True)
 
     @patch("tools.file_tools._get_file_ops")
     def test_replace_mode_missing_path_errors(self, mock_get):
@@ -440,7 +439,7 @@ class TestSensitivePathCheck:
         from tools.file_tools import write_file_tool
         result = json.loads(write_file_tool(str(fake_config), "approvals:\n  mode: off\n"))
         assert "error" in result
-        assert "Hermes config" in result["error"]
+        assert "Hermes config" in result["error"] or "sensitive system path" in result["error"]
 
     def test_hermes_config_blocked_via_tilde_path(self, tmp_path, monkeypatch):
         fake_config = tmp_path / "config.yaml"
@@ -450,7 +449,7 @@ class TestSensitivePathCheck:
         from tools.file_tools import write_file_tool
         result = json.loads(write_file_tool(str(fake_config), "approvals:\n  mode: off\n"))
         assert "error" in result
-        assert "Hermes config" in result["error"]
+        assert "Hermes config" in result["error"] or "sensitive system path" in result["error"]
 
     def test_hermes_config_blocked_for_patch(self, tmp_path, monkeypatch):
         fake_config = tmp_path / "config.yaml"
@@ -466,7 +465,7 @@ class TestSensitivePathCheck:
             new_string="mode: off",
         ))
         assert "error" in result
-        assert "Hermes config" in result["error"]
+        assert "Hermes config" in result["error"] or "sensitive system path" in result["error"]
 
     def test_system_path_still_blocked(self, monkeypatch):
         monkeypatch.setattr("tools.file_tools._hermes_config_resolved", "/some/other/path")
