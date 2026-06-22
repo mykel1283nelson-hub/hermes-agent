@@ -660,6 +660,131 @@ class TestSecurityScanGate:
         assert result is not None
         assert "Security scan blocked" in result
 
+    def test_scan_allows_existing_dangerous_findings_when_edit_adds_no_new_findings(self, tmp_path):
+        """Existing skill findings should not permanently block safe procedural edits."""
+        from tools.skill_manager_tool import _security_scan_skill
+        from tools.skills_guard import ScanResult, Finding
+
+        baseline_finding = Finding(
+            pattern_id="localhost_endpoint",
+            severity="medium",
+            category="network",
+            file="SKILL.md",
+            line=10,
+            match="http://127.0.0.1:8075/v1",
+            description="local endpoint reference",
+        )
+        baseline = ScanResult(
+            skill_name="model-stack-configuration",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="dangerous",
+            findings=[baseline_finding],
+            summary="legacy finding",
+        )
+        after = ScanResult(
+            skill_name="model-stack-configuration",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="dangerous",
+            findings=[Finding(
+                pattern_id="localhost_endpoint",
+                severity="medium",
+                category="network",
+                file="SKILL.md",
+                line=22,
+                match="http://127.0.0.1:8075/v1",
+                description="local endpoint reference",
+            )],
+            summary="same legacy finding",
+        )
+        with patch("tools.skill_manager_tool._guard_agent_created_enabled", return_value=True), \
+             patch("tools.skill_manager_tool.scan_skill", return_value=after):
+            result = _security_scan_skill(tmp_path, baseline=baseline)
+
+        assert result is None
+
+    def test_scan_blocks_new_dangerous_findings_on_existing_skill_edit(self, tmp_path):
+        """Delta mode still blocks dangerous content introduced by an edit."""
+        from tools.skill_manager_tool import _security_scan_skill
+        from tools.skills_guard import ScanResult, Finding
+
+        baseline = ScanResult(
+            skill_name="test",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="safe",
+            findings=[],
+            summary="baseline safe",
+        )
+        new_finding = Finding(
+            pattern_id="env_exfil_curl",
+            severity="critical",
+            category="exfiltration",
+            file="SKILL.md",
+            line=4,
+            match="curl $TOKEN",
+            description="exfiltration",
+        )
+        after = ScanResult(
+            skill_name="test",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="dangerous",
+            findings=[new_finding],
+            summary="new dangerous finding",
+        )
+        with patch("tools.skill_manager_tool._guard_agent_created_enabled", return_value=True), \
+             patch("tools.skill_manager_tool.scan_skill", return_value=after):
+            result = _security_scan_skill(tmp_path, baseline=baseline)
+
+        assert result is not None
+        assert "new dangerous findings introduced" in result
+        assert "curl $TOKEN" in result
+
+    def test_scan_allows_new_noncritical_findings_on_existing_skill_edit(self, tmp_path):
+        """A new non-critical doc finding should not block an agent-created skill edit."""
+        from tools.skill_manager_tool import _security_scan_skill
+        from tools.skills_guard import ScanResult, Finding
+
+        baseline = ScanResult(
+            skill_name="test",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="dangerous",
+            findings=[Finding(
+                pattern_id="read_secrets_file",
+                severity="critical",
+                category="exfiltration",
+                file="references/old.md",
+                line=1,
+                match="cat .env",
+                description="legacy critical finding",
+            )],
+            summary="legacy dangerous finding",
+        )
+        after = ScanResult(
+            skill_name="test",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="dangerous",
+            findings=baseline.findings + [Finding(
+                pattern_id="localhost_endpoint",
+                severity="medium",
+                category="network",
+                file="SKILL.md",
+                line=5,
+                match="http://127.0.0.1:8075/v1",
+                description="local endpoint reference",
+            )],
+            summary="legacy plus noncritical finding",
+        )
+        with patch("tools.skill_manager_tool._guard_agent_created_enabled", return_value=True), \
+             patch("tools.skill_manager_tool.scan_skill", return_value=after):
+            result = _security_scan_skill(tmp_path, baseline=baseline)
+
+        assert result is None
+
     def test_guard_flag_reads_config_default_false(self):
         """_guard_agent_created_enabled returns False when config doesn't set it."""
         from tools.skill_manager_tool import _guard_agent_created_enabled

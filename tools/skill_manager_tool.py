@@ -53,6 +53,9 @@ try:
     from tools.skills_guard import scan_skill, should_allow_install, format_scan_report
     _GUARD_AVAILABLE = True
 except ImportError:
+    scan_skill = None
+    should_allow_install = None
+    format_scan_report = None
     _GUARD_AVAILABLE = False
 
 
@@ -75,21 +78,89 @@ def _guard_agent_created_enabled() -> bool:
         return False
 
 
-def _security_scan_skill(skill_dir: Path) -> Optional[str]:
+def _finding_identity(finding: Any) -> Tuple[str, str, str]:
+    """Stable identity for comparing skill-scan findings across edits.
+
+    Line numbers are intentionally excluded: a procedural documentation patch near
+    the top of a skill can shift every pre-existing finding down without making
+    the edit more dangerous.  Pattern + relative file + matched text is stable
+    enough to tell pre-existing operational references from newly introduced
+    dangerous content.
+    """
+    return (
+        str(getattr(finding, "pattern_id", "")),
+        str(getattr(finding, "file", "")),
+        str(getattr(finding, "match", "")),
+    )
+
+
+def _security_scan_baseline(skill_dir: Path) -> Optional[Any]:
+    """Return a pre-edit scan result when the agent-created guard is active."""
+    if not _GUARD_AVAILABLE:
+        return None
+    if not _guard_agent_created_enabled():
+        return None
+    try:
+        assert scan_skill is not None
+        return scan_skill(skill_dir, source="agent-created")
+    except Exception as e:
+        logger.warning("Pre-edit security scan failed for %s: %s", skill_dir, e, exc_info=True)
+        return None
+
+
+def _security_scan_skill(skill_dir: Path, baseline: Any = None) -> Optional[str]:
     """Scan a skill directory after write. Returns error string if blocked, else None.
 
     No-op when skills.guard_agent_created is disabled (the default).
+
+    When ``baseline`` is supplied for an existing skill edit, only newly
+    introduced dangerous findings are hard-blocking.  This preserves the scanner
+    for actual malicious additions while avoiding a stale procedural bottleneck:
+    an old agent-created skill may already contain documented localhost,
+    launchctl, or config examples that scan as dangerous, and a harmless doc
+    update should not be blocked by those unrelated pre-existing findings.
     """
     if not _GUARD_AVAILABLE:
         return None
     if not _guard_agent_created_enabled():
         return None
     try:
+        assert scan_skill is not None
+        assert should_allow_install is not None
+        assert format_scan_report is not None
         result = scan_skill(skill_dir, source="agent-created")
         allowed, reason = should_allow_install(result)
         if allowed is False:
             report = format_scan_report(result)
             return f"Security scan blocked this skill ({reason}):\n{report}"
+        if allowed is None and baseline is not None:
+            before = {_finding_identity(f) for f in getattr(baseline, "findings", [])}
+            new_findings = [
+                f for f in result.findings
+                if _finding_identity(f) not in before
+            ]
+            new_blocking_findings = [
+                f for f in new_findings
+                if str(getattr(f, "severity", "")).lower() == "critical"
+            ]
+            if not new_blocking_findings:
+                logger.warning(
+                    "Agent-created skill retained pre-existing dangerous findings after edit without new critical findings: %s",
+                    skill_dir,
+                )
+                return None
+            # Build a compact synthetic report containing only the newly
+            # introduced dangerous findings so the caller can fix the patch
+            # rather than chasing unrelated legacy references.
+            narrowed = result
+            try:
+                from dataclasses import replace
+                narrowed = replace(result, findings=new_blocking_findings)
+            except Exception:
+                pass
+            report = format_scan_report(narrowed)
+            logger.warning("Agent-created skill blocked (new dangerous findings): %s", reason)
+            return f"Security scan blocked this skill ({reason}; new dangerous findings introduced):\n{report}"
         if allowed is None:
             # "ask" verdict — for agent-created skills this means dangerous
             # findings were detected.  Surface as an error so the agent can
@@ -641,10 +712,11 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
+    scan_baseline = _security_scan_baseline(existing["path"])
     _atomic_write_text(skill_md, content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(existing["path"])
+    scan_error = _security_scan_skill(existing["path"], baseline=scan_baseline)
     if scan_error:
         if original_content is not None:
             _atomic_write_text(skill_md, original_content)
@@ -748,10 +820,11 @@ def _patch_skill(
             }
 
     original_content = content  # for rollback
+    scan_baseline = _security_scan_baseline(skill_dir)
     _atomic_write_text(target, new_content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(skill_dir)
+    scan_error = _security_scan_skill(skill_dir, baseline=scan_baseline)
     if scan_error:
         _atomic_write_text(target, original_content)
         return {"success": False, "error": scan_error}
@@ -865,10 +938,11 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     target.parent.mkdir(parents=True, exist_ok=True)
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
+    scan_baseline = _security_scan_baseline(existing["path"])
     _atomic_write_text(target, file_content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(existing["path"])
+    scan_error = _security_scan_skill(existing["path"], baseline=scan_baseline)
     if scan_error:
         if original_content is not None:
             _atomic_write_text(target, original_content)

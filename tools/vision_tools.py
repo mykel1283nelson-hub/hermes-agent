@@ -798,6 +798,131 @@ async def _vision_analyze_native(
                 pass
 
 
+def _get_local_vision_cli_config() -> Optional[Dict[str, Any]]:
+    """Return local vision CLI config when auxiliary.vision requests it.
+
+    GodMode's trusted vision lane is not an OpenAI-compatible HTTP endpoint;
+    it is an existing local CLI (`scripts/vision/vision_client.py`) backed by
+    llama.cpp's `llama-mtmd-cli`. Treat it as a first-class local auxiliary
+    transport instead of sending image_url payloads to a chat-completions
+    endpoint that can only report `route_requires_specialized_adapter`.
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        cfg = load_config()
+        vision_cfg = cfg_get(cfg, "auxiliary", "vision", default={}) or {}
+    except Exception:
+        return None
+
+    provider = str(vision_cfg.get("provider") or "").strip().lower()
+    transport = str(vision_cfg.get("transport") or "").strip().lower()
+    if provider not in {"local_vision_cli", "llama_mtmd_cli"} and transport != "local_vision_cli":
+        return None
+
+    endpoint = str(
+        vision_cfg.get("endpoint")
+        or vision_cfg.get("cli_path")
+        or vision_cfg.get("script")
+        or ""
+    ).strip()
+    if not endpoint:
+        return None
+
+    return {
+        "endpoint": endpoint,
+        "profile": str(vision_cfg.get("profile") or "").strip(),
+        "timeout": float(vision_cfg.get("timeout") or 180),
+        "max_tokens": int(vision_cfg.get("max_tokens") or 512),
+    }
+
+
+async def _vision_analyze_local_cli(image_url: str, user_prompt: str) -> str:
+    """Analyze an image through the configured local vision CLI transport."""
+    import asyncio
+
+    cli_cfg = _get_local_vision_cli_config()
+    if not cli_cfg:
+        return tool_error("local_vision_cli is not configured", success=False)
+
+    endpoint = Path(os.path.expanduser(cli_cfg["endpoint"])).resolve()
+    if not endpoint.is_file():
+        return tool_error(f"local_vision_cli endpoint not found: {endpoint}", success=False)
+
+    temp_image_path: Optional[Path] = None
+    should_cleanup = False
+    try:
+        resolved_url = image_url
+        if resolved_url.startswith("file://"):
+            resolved_url = resolved_url[len("file://"):]
+        local_path = Path(os.path.expanduser(resolved_url))
+
+        if local_path.is_file():
+            temp_image_path = local_path
+        elif await _validate_image_url_async(image_url):
+            blocked = check_website_access(image_url)
+            if blocked:
+                return tool_error(blocked["message"], success=False)
+            temp_dir = get_hermes_dir("cache/vision", "temp_vision_images")
+            temp_image_path = temp_dir / f"temp_image_{uuid.uuid4()}.jpg"
+            await _download_image(image_url, temp_image_path)
+            should_cleanup = True
+        else:
+            return tool_error(
+                "Invalid image source. Provide an HTTP/HTTPS URL or a valid local file path.",
+                success=False,
+            )
+
+        if not _detect_image_mime_type(temp_image_path):
+            return tool_error("Only real image files are supported for vision analysis.", success=False)
+
+        cmd = [sys.executable, str(endpoint)]
+        if cli_cfg.get("profile"):
+            cmd += ["--profile", cli_cfg["profile"]]
+        cmd += [str(temp_image_path), user_prompt, str(cli_cfg["max_tokens"])]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=cli_cfg["timeout"])
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return tool_error(f"local_vision_cli timed out after {cli_cfg['timeout']}s", success=False)
+
+        stdout = stdout_b.decode("utf-8", errors="replace").strip()
+        stderr = stderr_b.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            return json.dumps({
+                "success": False,
+                "error": f"local_vision_cli exited {proc.returncode}: {stderr or stdout}",
+                "analysis": stderr or stdout or "Local vision CLI failed.",
+                "model_used": "local_vision_cli",
+            }, indent=2, ensure_ascii=False)
+
+        return json.dumps({
+            "success": True,
+            "analysis": stdout,
+            "model_used": "local_vision_cli",
+        }, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("local_vision_cli analysis failed: %s", exc, exc_info=True)
+        return json.dumps({
+            "success": False,
+            "error": f"local_vision_cli analysis failed: {exc}",
+            "analysis": f"Local vision CLI failed: {exc}",
+            "model_used": "local_vision_cli",
+        }, indent=2, ensure_ascii=False)
+    finally:
+        if should_cleanup and temp_image_path and temp_image_path.exists():
+            try:
+                temp_image_path.unlink()
+            except Exception:
+                logger.warning("Could not delete temporary local vision file", exc_info=True)
+
+
 async def vision_analyze_tool(
     image_url: str,
     user_prompt: str,
@@ -860,6 +985,10 @@ async def vision_analyze_tool(
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return tool_error("Interrupted", success=False)
+
+        if _get_local_vision_cli_config():
+            logger.info("vision_analyze: local_vision_cli auxiliary path")
+            return await _vision_analyze_local_cli(image_url, user_prompt)
 
         logger.info("Analyzing image: %s", image_url[:60])
         logger.info("User prompt: %s", user_prompt[:100])
@@ -1084,13 +1213,29 @@ async def vision_analyze_tool(
 def check_vision_requirements() -> bool:
     """Check if the configured runtime vision path can resolve a client.
 
-    Mirrors the fallback chain that ``call_llm(task="vision")`` actually uses
-    at runtime: first the explicit ``auxiliary.vision.provider`` (if any),
-    and if that fails, the auto chain (main provider → openrouter → nous).
-    Without the auto-fallback step the tool would disappear from the model's
-    tool list whenever the explicit provider name was unresolvable, even
-    when the auto chain would have served the request (issue #31179).
+    Supports both the standard OpenAI-compatible auxiliary vision resolver and
+    GodMode's local_vision_cli transport. The latter is intentionally not an
+    HTTP chat-completions client; availability is based on CLI health.
     """
+    cli_cfg = _get_local_vision_cli_config()
+    if cli_cfg:
+        endpoint = Path(os.path.expanduser(cli_cfg["endpoint"])).resolve()
+        if not endpoint.is_file():
+            return False
+        try:
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, str(endpoint), "--health"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=min(float(cli_cfg.get("timeout") or 30), 30.0),
+                check=False,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
     try:
         from agent.auxiliary_client import resolve_vision_provider_client
     except ImportError:

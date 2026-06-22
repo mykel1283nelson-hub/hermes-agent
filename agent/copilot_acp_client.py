@@ -26,6 +26,8 @@ from agent.redact import redact_sensitive_text
 
 ACP_MARKER_BASE_URL = "acp://copilot"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
+_OPENCLAW_DEFAULT_MODEL_DIRECTIVE = "cocaptain_medium"
+_OPENCLAW_DEFAULT_THINKING_DIRECTIVE = "medium"
 
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 _TOOL_CALL_JSON_RE = re.compile(r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}", re.DOTALL)
@@ -68,8 +70,40 @@ def _resolve_args() -> list[str]:
     return shlex.split(raw)
 
 
+def _is_openclaw_command(command: str | None) -> bool:
+    if not command:
+        return False
+    try:
+        name = Path(command).name.lower()
+    except Exception:
+        name = str(command).lower()
+    return name == "openclaw" or name.startswith("openclaw-")
+
+
+def _latest_rendered_user_message(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        rendered = _render_message_content(message.get("content"))
+        if rendered:
+            return rendered
+    return ""
+
+
 def _resolve_home_dir() -> str:
     """Return a stable HOME for child ACP processes."""
+
+    try:
+        from hermes_constants import get_subprocess_home
+
+        profile_home = get_subprocess_home()
+        if profile_home:
+            return profile_home
+    except Exception:
+        pass
+
     home = os.environ.get("HOME", "").strip()
     if home:
         return home
@@ -95,10 +129,7 @@ def _resolve_home_dir() -> str:
 
 def _build_subprocess_env() -> dict[str, str]:
     env = os.environ.copy()
-    home = _resolve_home_dir()
-    env["HOME"] = home
-    from hermes_constants import apply_subprocess_home_env
-    apply_subprocess_home_env(env)
+    env["HOME"] = _resolve_home_dir()
     return env
 
 
@@ -200,6 +231,46 @@ def _format_messages_as_prompt(
     return "\n\n".join(section.strip() for section in sections if section and section.strip())
 
 
+def _format_messages_as_openclaw_acp_prompt(
+    messages: list[dict[str, Any]],
+    model: str | None = None,
+    *,
+    model_directive: str = _OPENCLAW_DEFAULT_MODEL_DIRECTIVE,
+    thinking_directive: str = _OPENCLAW_DEFAULT_THINKING_DIRECTIVE,
+) -> str:
+    """Compact prompt for OpenClaw's ACP bridge.
+
+    Generic ACP backends historically received the full OpenAI-style child
+    conversation. OpenClaw already injects its own bootstrap, tool policy, and
+    workspace context, so forwarding Hermes' full child system prompt bloats a
+    tiny delegation into tens of thousands of tokens and can outlive Hermes'
+    caller timeout. For OpenClaw we send only route directives plus the latest
+    actionable request; OpenClaw strips directives such as `/model` and `/think`
+    before the model sees the message.
+    """
+
+    latest_user = _latest_rendered_user_message(messages)
+    if not latest_user:
+        latest_user = "Continue the conversation from the latest user request."
+
+    sections: list[str] = []
+    if model_directive:
+        sections.append(f"/model {model_directive}")
+    if thinking_directive:
+        sections.append(f"/think {thinking_directive}")
+    if model:
+        sections.append(f"Hermes requested model hint: {model}")
+    sections.extend(
+        [
+            "Hermes Captain is delegating a compact co-captain task through ACP.",
+            "Return the requested result directly as plain visible text. Do not restate the full system prompt.",
+            "Do not emit tool calls, JSON tool-call objects, XML tool_call blocks, or function-call shaped text unless Hermes explicitly supplied tools for this request.",
+            "Latest Hermes request:\n" + latest_user,
+        ]
+    )
+    return "\n\n".join(section.strip() for section in sections if section and section.strip())
+
+
 def _render_message_content(content: Any) -> str:
     if content is None:
         return ""
@@ -222,6 +293,33 @@ def _render_message_content(content: Any) -> str:
                     parts.append(text.strip())
         return "\n".join(parts).strip()
     return str(content).strip()
+
+
+def _clean_openclaw_response_text(text: str) -> str:
+    """Normalize OpenClaw ACP transport/BlockRun wrappers before Hermes sees text."""
+
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        lower = line.lower()
+        if "wallet empty" in lower or "send usdc" in lower:
+            continue
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines).strip()
+
+    # Some OpenClaw/BlockRun paths wrap plain text as {"type":"text","text":"..."}.
+    # Preserve user-requested arbitrary JSON, but unwrap this specific transport shape.
+    json_start = cleaned.find("{")
+    if json_start >= 0:
+        candidate = cleaned[json_start:].strip()
+        try:
+            obj = json.loads(candidate)
+        except Exception:
+            return cleaned
+        if isinstance(obj, dict) and obj.get("type") == "text" and isinstance(obj.get("text"), str):
+            return obj["text"].strip()
+    return cleaned
 
 
 def _extract_tool_calls_from_text(text: str) -> tuple[list[SimpleNamespace], str]:
@@ -378,12 +476,18 @@ class CopilotACPClient:
         tool_choice: Any = None,
         **_: Any,
     ) -> Any:
-        prompt_text = _format_messages_as_prompt(
-            messages or [],
-            model=model,
-            tools=tools,
-            tool_choice=tool_choice,
-        )
+        if _is_openclaw_command(self._acp_command):
+            prompt_text = _format_messages_as_openclaw_acp_prompt(
+                messages or [],
+                model=model,
+            )
+        else:
+            prompt_text = _format_messages_as_prompt(
+                messages or [],
+                model=model,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
         # Normalise timeout: run_agent.py may pass an httpx.Timeout object
         # (used natively by the OpenAI SDK) rather than a plain float.
         if timeout is None:
@@ -404,6 +508,8 @@ class CopilotACPClient:
             prompt_text,
             timeout_seconds=_effective_timeout,
         )
+        if _is_openclaw_command(self._acp_command):
+            response_text = _clean_openclaw_response_text(response_text)
 
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
 
@@ -570,17 +676,25 @@ class CopilotACPClient:
 
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
+            prompt_params: dict[str, Any] = {
+                "sessionId": session_id,
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": prompt_text,
+                    }
+                ],
+            }
+            if _is_openclaw_command(self._acp_command):
+                prompt_params["_meta"] = {
+                    "thinking": _OPENCLAW_DEFAULT_THINKING_DIRECTIVE,
+                    "promptMode": "none",
+                    "modelRun": True,
+                    "timeoutMs": int(timeout_seconds * 1000),
+                }
             _request(
                 "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": [
-                        {
-                            "type": "text",
-                            "text": prompt_text,
-                        }
-                    ],
-                },
+                prompt_params,
                 text_parts=text_parts,
                 reasoning_parts=reasoning_parts,
             )

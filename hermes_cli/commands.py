@@ -228,6 +228,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, aliases=("gateway",)),
     CommandDef("platform", "Pause, resume, or list a failing gateway platform", "Info",
                gateway_only=True, args_hint="<pause|resume|list> [name]"),
+    CommandDef("modelroute", "Run a message through the GodMode selected model route", "Info",
+               gateway_only=True, args_hint="<task_class> <message>"),
     CommandDef("copy", "Copy the last assistant response to clipboard", "Info",
                cli_only=True, args_hint="[number]"),
     CommandDef("paste", "Attach clipboard image from your clipboard", "Info",
@@ -1950,3 +1952,5 @@ def _file_size_label(path: str) -> str:
     if size < 1024 * 1024 * 1024:
         return f"{size / (1024 * 1024):.1f}M"
     return f"{size / (1024 * 1024 * 1024):.1f}G"
+    CommandDef("modelroute", "Dispatch one prompt through the selected local model route",
+               "Configuration", gateway_only=True, args_hint="<task_class> <message>"),

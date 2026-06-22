@@ -111,6 +111,21 @@ class TestIsTimeoutError:
 
 
 # ---------------------------------------------------------------------------
+# _retry_after_delay
+# ---------------------------------------------------------------------------
+
+class TestRetryAfterDelay:
+    def test_extracts_telegram_retry_in_seconds(self):
+        assert _StubAdapter._retry_after_delay("Flood control exceeded. Retry in 23 seconds") == 23
+
+    def test_extracts_retry_after_seconds(self):
+        assert _StubAdapter._retry_after_delay("rate limited: retry after 4.5s") == 4.5
+
+    def test_missing_retry_after_returns_none(self):
+        assert _StubAdapter._retry_after_delay("httpx.ConnectError") is None
+
+
+# ---------------------------------------------------------------------------
 # _send_with_retry — success on first attempt
 # ---------------------------------------------------------------------------
 
@@ -147,6 +162,19 @@ class TestSendWithRetryNetworkRetry:
             result = await adapter._send_with_retry("chat1", "hello", max_retries=2, base_delay=0)
         assert result.success
         assert len(adapter._send_calls) == 2  # initial + 1 retry
+
+    @pytest.mark.asyncio
+    async def test_honors_retry_after_before_retrying(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="Flood control exceeded. Retry in 23 seconds", retryable=True),
+            SendResult(success=True, message_id="ok"),
+        ]
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep, patch("random.uniform", return_value=0):
+            result = await adapter._send_with_retry("chat1", "hello", max_retries=2, base_delay=0)
+        assert result.success
+        mock_sleep.assert_awaited_once_with(24.0)
+        assert len(adapter._send_calls) == 2
 
     @pytest.mark.asyncio
     async def test_timeout_not_retried_to_prevent_duplicates(self):

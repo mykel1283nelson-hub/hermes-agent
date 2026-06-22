@@ -3701,6 +3701,25 @@ class BasePlatformAdapter(ABC):
         lowered = error.lower()
         return "timed out" in lowered or "readtimeout" in lowered or "writetimeout" in lowered
 
+    @staticmethod
+    def _retry_after_delay(error: Optional[str]) -> Optional[float]:
+        """Extract a provider/platform Retry-After delay from an error string.
+
+        Telegram flood-control errors arrive as human text such as
+        ``Flood control exceeded. Retry in 23 seconds``. Generic exponential
+        backoff retries too early and can exhaust delivery attempts while the
+        flood window is still active, causing false delivery-failure notices.
+        """
+        if not error:
+            return None
+        match = re.search(r"retry\s+(?:after|in)\s+(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)?", error, re.I)
+        if not match:
+            return None
+        try:
+            return max(0.0, float(match.group(1)))
+        except (TypeError, ValueError):
+            return None
+
     def _unwrap_ephemeral(self, response: Any) -> Tuple[Optional[str], int]:
         """Unwrap a handler response into (text, ttl_seconds).
 
@@ -3762,7 +3781,11 @@ class BasePlatformAdapter(ABC):
         if is_network:
             # Retry with exponential backoff for transient errors
             for attempt in range(1, max_retries + 1):
-                delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                retry_after = self._retry_after_delay(error_str)
+                if retry_after is not None:
+                    delay = retry_after + 1.0 + random.uniform(0, 0.5)
+                else:
+                    delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
                 logger.warning(
                     "[%s] Send failed (attempt %d/%d, retrying in %.1fs): %s",
                     self.name, attempt, max_retries, delay, error_str,

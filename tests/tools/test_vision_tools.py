@@ -425,6 +425,36 @@ class TestVisionConfig:
         assert result["success"] is True
         assert mock_llm.await_args.kwargs["temperature"] == 0.1
         assert mock_llm.await_args.kwargs["timeout"] == 120.0
+    @pytest.mark.asyncio
+    async def test_local_vision_cli_config_uses_cli_path_not_http_aux(self, tmp_path):
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+
+        with (
+            patch("hermes_cli.config.load_config", return_value={
+                "auxiliary": {"vision": {
+                    "provider": "local_vision_cli",
+                    "endpoint": "/tmp/vision_client.py",
+                    "timeout": 12,
+                }}
+            }),
+            patch(
+                "tools.vision_tools._vision_analyze_local_cli",
+                new_callable=AsyncMock,
+                return_value=json.dumps({
+                    "success": True,
+                    "analysis": "local cli analysis",
+                    "model_used": "local_vision_cli",
+                }),
+            ) as mock_cli,
+            patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock) as mock_llm,
+        ):
+            result = json.loads(await vision_analyze_tool(str(img), "describe this", "test/model"))
+
+        assert result["success"] is True
+        assert result["model_used"] == "local_vision_cli"
+        mock_cli.assert_awaited_once()
+        mock_llm.assert_not_awaited()
 
 
 class TestVisionSafetyGuards:

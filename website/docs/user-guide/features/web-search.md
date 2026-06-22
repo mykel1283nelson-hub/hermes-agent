@@ -19,6 +19,7 @@ Both are configured through a single backend selection. Providers are chosen via
 | Provider | Env Var | Search | Extract | Free tier |
 |----------|---------|--------|---------|-----------|
 | **Firecrawl** (default) | `FIRECRAWL_API_KEY` | ✔ | ✔ | 500 credits/mo |
+| **Direct HTTP** | — | — | ✔ | ✔ Free |
 | **SearXNG** | `SEARXNG_URL` | ✔ | — | ✔ Free (self-hosted) |
 | **Brave Search (free tier)** | `BRAVE_SEARCH_API_KEY` | ✔ | — | 2 000 queries/mo |
 | **DDGS (DuckDuckGo)** | — (no key) | ✔ | — | ✔ Free |
@@ -228,10 +229,10 @@ SearXNG handles search; you need a separate provider for `web_extract`. Use the 
 # ~/.hermes/config.yaml
 web:
   search_backend: "searxng"
-  extract_backend: "firecrawl"   # or tavily, exa, parallel
+  extract_backend: "direct-http"  # zero-credit fallback; or firecrawl, tavily, exa, parallel
 ```
 
-With this config, Hermes uses SearXNG for all search queries and Firecrawl for URL extraction — combining free search with high-quality extraction.
+With this config, Hermes uses SearXNG for all search queries and direct bounded HTTPS fetches for URL extraction — a fully free lane for public docs and static pages. Direct HTTP is intentionally simple: it extracts visible text from public HTTP(S) pages without JavaScript/browser rendering. Use Firecrawl/Tavily/Exa/Parallel only when bankroll/credits support higher-fidelity extraction, or use the browser tool for interactive/dynamic pages.
 
 ---
 

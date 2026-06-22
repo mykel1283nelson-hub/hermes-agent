@@ -61,6 +61,7 @@ import sys
 import tempfile
 import threading
 import time
+import asyncio
 import requests
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
@@ -112,6 +113,34 @@ except ImportError:
     _is_camofox_mode = lambda: False  # noqa: E731
 
 logger = logging.getLogger(__name__)
+
+
+def _run_async_blocking(coro):
+    """Run an async helper from this synchronous browser tool.
+
+    Most browser_tool entrypoints are sync. When no event loop is active,
+    asyncio.run is the clean path. If a caller is already inside an event loop,
+    run the coroutine in a short-lived thread so we do not nest event loops.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    box = {}
+
+    def _runner():
+        try:
+            box["result"] = asyncio.run(coro)
+        except BaseException as exc:  # propagate into caller thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
 
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services).
 # Includes Android/Termux and macOS Homebrew locations needed for agent-browser,
@@ -3379,6 +3408,49 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
             f"or CAPTCHAs, describe what type they are and what action might be needed. "
             f"Focus on answering the user's specific question."
         )
+
+        # Native local auxiliary transport. GodMode's trusted Qwen3-VL lane is
+        # a local CLI (`scripts/vision/vision_client.py`), not an
+        # OpenAI-compatible chat-completions endpoint. Reuse the canonical
+        # vision tool helper so browser_vision follows the same native route
+        # as vision_analyze instead of sending screenshots through the generic
+        # auxiliary LLM path, where the router correctly rejects the transport.
+        from tools.vision_tools import (
+            _get_local_vision_cli_config,
+            _vision_analyze_local_cli,
+        )
+        if _get_local_vision_cli_config():
+            local_result_raw = _run_async_blocking(
+                _vision_analyze_local_cli(str(screenshot_path), vision_prompt)
+            )
+            local_result_raw = str(local_result_raw or "")
+            try:
+                local_result = json.loads(local_result_raw)
+            except Exception:
+                local_result = {
+                    "success": False,
+                    "error": "local_vision_cli returned non-JSON output",
+                    "analysis": local_result_raw,
+                }
+            if local_result.get("success"):
+                from agent.redact import redact_sensitive_text
+                response_data = {
+                    "success": True,
+                    "analysis": redact_sensitive_text(str(local_result.get("analysis") or "")),
+                    "screenshot_path": str(screenshot_path),
+                    "model_used": local_result.get("model_used", "local_vision_cli"),
+                }
+                _copy_fallback_warning(response_data, result)
+                if annotate and result.get("data", {}).get("annotations"):
+                    response_data["annotations"] = result["data"]["annotations"]
+                return json.dumps(response_data, ensure_ascii=False)
+            return json.dumps({
+                "success": False,
+                "error": local_result.get("error") or "local_vision_cli failed",
+                "analysis": local_result.get("analysis") or "Local vision CLI failed.",
+                "screenshot_path": str(screenshot_path),
+                "model_used": local_result.get("model_used", "local_vision_cli"),
+            }, ensure_ascii=False)
 
         # Use the centralized LLM router
         vision_model = _get_vision_model()

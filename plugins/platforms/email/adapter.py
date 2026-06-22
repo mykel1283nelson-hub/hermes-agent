@@ -183,6 +183,28 @@ def _decode_header_value(raw: str) -> str:
     return " ".join(decoded)
 
 
+def _extract_imap_fetch_payload(msg_data: Any) -> Optional[bytes]:
+    """Return the RFC822 bytes payload from an IMAP FETCH response.
+
+    imaplib may include non-tuple metadata entries (for example FLAGS or a
+    closing parenthesis) before or after the ``(metadata, payload)`` tuple.
+    Indexing ``msg_data[0][1]`` can therefore turn a metadata byte string into
+    an integer and crash email parsing with ``'int' object has no attribute
+    'decode'``.
+    """
+    if not msg_data:
+        return None
+    for item in msg_data:
+        if not isinstance(item, tuple) or len(item) < 2:
+            continue
+        payload = item[1]
+        if isinstance(payload, bytes):
+            return payload
+        if isinstance(payload, bytearray):
+            return bytes(payload)
+    return None
+
+
 def _extract_text_body(msg: email_lib.message.Message) -> str:
     """Extract the plain-text body from a potentially multipart email."""
     if msg.is_multipart():
@@ -529,7 +551,10 @@ class EmailAdapter(BasePlatformAdapter):
                     if status != "OK":
                         continue
 
-                    raw_email = msg_data[0][1]
+                    raw_email = _extract_imap_fetch_payload(msg_data)
+                    if raw_email is None:
+                        logger.debug("[Email] IMAP fetch returned no RFC822 payload for UID %r", uid)
+                        continue
                     msg = email_lib.message_from_bytes(raw_email)
 
                     sender_raw = msg.get("From", "")

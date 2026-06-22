@@ -22,6 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 import os
+from pathlib import Path
 import threading
 import time
 from concurrent.futures import (
@@ -1132,9 +1133,18 @@ def _build_child_agent(
 
     # Resolve effective credentials: config override > parent inherit
     effective_model = model or parent_agent.model
-    effective_provider = override_provider or getattr(parent_agent, "provider", None)
-    effective_base_url = override_base_url or parent_agent.base_url
-    effective_api_key = override_api_key or parent_api_key
+    # When ACP command is explicitly set, it defines its own transport.
+    # Do NOT inherit parent provider in that case.
+    has_acp_override = bool(override_acp_command or getattr(parent_agent, "acp_command", None))
+    effective_provider = override_provider if not has_acp_override else None
+    if effective_provider is None and not has_acp_override:
+        effective_provider = getattr(parent_agent, "provider", None)
+    effective_base_url = override_base_url if not has_acp_override else None
+    if effective_base_url is None and not has_acp_override:
+        effective_base_url = parent_agent.base_url
+    effective_api_key = override_api_key if not has_acp_override else None
+    if effective_api_key is None and not has_acp_override:
+        effective_api_key = parent_api_key
     # Bug #20558 / PR #20563: api_mode must NOT be inherited when the child uses a
     # different provider than the parent — each provider has its own API surface
     # (e.g. MiniMax uses anthropic_messages, DeepSeek uses chat_completions).
@@ -1165,10 +1175,23 @@ def _build_child_agent(
         effective_acp_args = []
 
     if override_acp_command:
-        # If explicitly forcing an ACP transport override, the provider MUST be copilot-acp
-        # so run_agent.py initializes the CopilotACPClient.
-        effective_provider = "copilot-acp"
-        effective_api_mode = "chat_completions"
+        # Route ACP transport based on the command. Accept either a bare command
+        # name or an absolute executable path from real gateway configs.
+        # - 'copilot' or 'copilot-acp' -> GitHub Copilot CLI via CopilotACPClient
+        # - 'openclaw' -> OpenClaw CLI via the native OpenClaw ACP bridge
+        acp_cmd_raw = override_acp_command.strip()
+        acp_cmd = Path(acp_cmd_raw).name.lower()
+        if acp_cmd in ("copilot", "copilot-acp"):
+            effective_provider = "copilot-acp"
+            effective_api_mode = "chat_completions"
+        elif acp_cmd == "openclaw" or acp_cmd.startswith("openclaw-"):
+            effective_provider = "openclaw-acp"
+            effective_api_mode = "chat_completions"
+        else:
+            # Unknown ACP command; default to copilot-acp for backwards compat but warn
+            logger.warning("Unknown acp_command=%r, defaulting to copilot-acp", override_acp_command)
+            effective_provider = "copilot-acp"
+            effective_api_mode = "chat_completions"
 
     # Resolve reasoning config: delegation override > parent inherit
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
@@ -2232,10 +2255,21 @@ def delegate_task(
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                # When an explicit ACP command is given (e.g., openclaw), it defines
+                # its own transport and credentials. Do NOT pass the delegation
+                # provider config, which would force copilot-acp or GPT-5.5.
+                override_provider=creds["provider"] if not (
+                    t.get("acp_command") or acp_command or creds.get("command")
+                ) else None,
+                override_base_url=creds["base_url"] if not (
+                    t.get("acp_command") or acp_command or creds.get("command")
+                ) else None,
+                override_api_key=creds["api_key"] if not (
+                    t.get("acp_command") or acp_command or creds.get("command")
+                ) else None,
+                override_api_mode=creds["api_mode"] if not (
+                    t.get("acp_command") or acp_command or creds.get("command")
+                ) else None,
                 override_acp_command=t.get("acp_command")
                 or acp_command
                 or creds.get("command"),

@@ -4144,6 +4144,41 @@ def resolve_provider_client(
             logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
+
+        if provider == "openclaw-acp":
+            # OpenClaw native ACP bridge: `openclaw acp`
+            # Reuses the same ACP client pattern but with openclaw command
+            api_key = str(creds.get("api_key", "")).strip()
+            base_url = str(creds.get("base_url", "")).strip()
+            command = str(creds.get("command", "")).strip() or "openclaw"
+            args = list(creds.get("args") or ["acp", "--stdio"])
+            if not final_model:
+                logger.warning(
+                    "resolve_provider_client: openclaw-acp requested but no model "
+                    "was provided or configured"
+                )
+                return None, None
+            if not api_key or not base_url:
+                logger.warning(
+                    "resolve_provider_client: openclaw-acp requested but external "
+                    "process credentials are incomplete"
+                )
+                return None, None
+            # Use the same CopilotACPClient pattern but with openclaw command
+            from agent.copilot_acp_client import CopilotACPClient
+
+            client = CopilotACPClient(
+                api_key=api_key,
+                base_url=base_url,
+                command=command,
+                args=args,
+                acp_command=command,
+                acp_args=args,
+            )
+            logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
+            return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
+                    else (client, final_model))
+
         logger.warning("resolve_provider_client: external-process provider %s not "
                        "directly supported", provider)
         return None, None

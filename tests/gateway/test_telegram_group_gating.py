@@ -516,6 +516,17 @@ def test_bot_command_addressed_to_other_bot_is_exclusive_even_when_mentions_not_
     assert test1_bot._should_process_message(_group_message(text, entities=[entity]), is_command=True) is True
 
 
+def test_embedded_other_bot_command_example_does_not_block_free_response_topic():
+    text = (
+        "Telegram bot-to-bot docs say one bot can interact with another by "
+        "mentioning it in a command like /command@OtherBot or by replying directly."
+    )
+    entity = _bot_command_entity(text, "/command@OtherBot")
+    adapter = _make_adapter(require_mention=False, bot_username="agentmoneyleadbot")
+
+    assert adapter._should_process_message(_group_message(text, entities=[entity], thread_id=14277)) is True
+
+
 def test_raw_bot_mention_fallback_does_not_match_email_or_substring():
     adapter = _make_adapter(require_mention=True, bot_username="hermes_bot")
 

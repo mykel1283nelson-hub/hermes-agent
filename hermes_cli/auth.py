@@ -225,6 +225,13 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
     ),
+    "openclaw-acp": ProviderConfig(
+        id="openclaw-acp",
+        name="OpenClaw ACP",
+        auth_type="external_process",
+        inference_base_url="http://127.0.0.1:8402/v1",
+        base_url_env_var="OPENCLAW_ACP_BASE_URL",
+    ),
     "gemini": ProviderConfig(
         id="gemini",
         name="Google AI Studio",
@@ -6244,30 +6251,63 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
-    resolved_command = shutil.which(command) if command else None
-    if not resolved_command and not base_url.startswith("acp+tcp://"):
-        raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
-            provider=provider_id,
-            code="missing_copilot_cli",
+    if provider_id == "copilot-acp":
+        command = (
+            os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
+            or os.getenv("COPILOT_CLI_PATH", "").strip()
+            or "copilot"
         )
+        raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+        args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+        resolved_command = shutil.which(command) if command else None
+        if not resolved_command and not base_url.startswith("acp+tcp://"):
+            raise AuthError(
+                f"Could not find the Copilot CLI command '{command}'. "
+                "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+                provider=provider_id,
+                code="missing_copilot_cli",
+            )
 
-    return {
-        "provider": provider_id,
-        "api_key": "copilot-acp",
-        "base_url": base_url.rstrip("/"),
-        "command": resolved_command or command,
-        "args": args,
-        "source": "process",
-    }
+        return {
+            "provider": provider_id,
+            "api_key": "copilot-acp",
+            "base_url": base_url.rstrip("/"),
+            "command": resolved_command or command,
+            "args": args,
+            "source": "process",
+        }
+
+    if provider_id == "openclaw-acp":
+        command = (
+            os.getenv("HERMES_OPENCLAW_ACP_COMMAND", "").strip()
+            or "openclaw"
+        )
+        raw_args = os.getenv("HERMES_OPENCLAW_ACP_ARGS", "").strip()
+        args = shlex.split(raw_args) if raw_args else ["acp", "--stdio"]
+        resolved_command = shutil.which(command) if command else None
+        if not resolved_command and not base_url.startswith("acp+tcp://"):
+            raise AuthError(
+                f"Could not find the OpenClaw CLI command '{command}'. "
+                "Install OpenClaw CLI or set HERMES_OPENCLAW_ACP_COMMAND.",
+                provider=provider_id,
+                code="missing_openclaw_cli",
+            )
+
+        return {
+            "provider": provider_id,
+            "api_key": "openclaw-acp",
+            "base_url": base_url.rstrip("/"),
+            "command": resolved_command or command,
+            "args": args,
+            "source": "process",
+        }
+
+    # Unknown external-process provider
+    raise AuthError(
+        f"External-process provider '{provider_id}' not implemented.",
+        provider=provider_id,
+        code="unimplemented_provider",
+    )
 
 
 # =============================================================================

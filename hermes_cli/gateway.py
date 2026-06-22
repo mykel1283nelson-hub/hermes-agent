@@ -3487,6 +3487,27 @@ def generate_launchd_plist() -> str:
 """
 
 
+def _launchd_plist_is_approved_godmode_wrapper(installed: str) -> bool:
+    """Recognize the operator-approved GodMode launch wrapper as current.
+
+    The wrapper runs ``codex_hijack_guard.py`` before starting the normal Hermes
+    gateway. Treating it as stale causes ``hermes gateway status/start`` to
+    recommend or perform a downgrade to the stock direct Python command, removing
+    the guard. Keep this check exact and local to the known GodMode paths.
+    """
+    required_markers = (
+        "<string>ai.hermes.gateway</string>",
+        "<string>/Users/agentmoney/godmode-workspace/scripts/runtime/hermes_gateway_launch.sh</string>",
+        "<key>HERMES_HOME</key>",
+        "<string>/Users/agentmoney/.hermes</string>",
+        "<key>KeepAlive</key>",
+        "<true/>",
+        "<key>RunAtLoad</key>",
+        "<true/>",
+    )
+    return all(marker in installed for marker in required_markers)
+
+
 def launchd_plist_is_current() -> bool:
     """Check if the installed launchd plist matches the currently generated one."""
     plist_path = get_launchd_plist_path()
@@ -3495,6 +3516,8 @@ def launchd_plist_is_current() -> bool:
 
     installed = plist_path.read_text(encoding="utf-8")
     expected = generate_launchd_plist()
+    if _launchd_plist_is_approved_godmode_wrapper(installed):
+        return True
     return _normalize_launchd_plist_for_comparison(
         installed
     ) == _normalize_launchd_plist_for_comparison(expected)

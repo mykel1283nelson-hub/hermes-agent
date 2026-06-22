@@ -755,7 +755,7 @@ def init_agent(
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
             if _provider_timeout is not None:
                 client_kwargs["timeout"] = _provider_timeout
-            if agent.provider == "copilot-acp":
+            if agent.provider in {"copilot-acp", "openclaw-acp"}:
                 client_kwargs["command"] = agent.acp_command
                 client_kwargs["args"] = agent.acp_args
             effective_base = base_url
@@ -814,6 +814,13 @@ def init_agent(
                     _routed_headers = getattr(_routed_client, "_default_headers", None)
                 if _routed_headers:
                     client_kwargs["default_headers"] = dict(_routed_headers)
+                if (agent.provider or "").strip().lower() in {"copilot-acp", "openclaw-acp"}:
+                    _routed_command = getattr(agent, "acp_command", None) or getattr(_routed_client, "_acp_command", None)
+                    _routed_args = getattr(agent, "acp_args", None) or getattr(_routed_client, "_acp_args", None)
+                    if _routed_command:
+                        client_kwargs["command"] = _routed_command
+                    if _routed_args is not None:
+                        client_kwargs["args"] = list(_routed_args)
             else:
                 # When the user explicitly chose a non-OpenRouter provider
                 # but no credentials were found, fail fast with a clear

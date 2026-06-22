@@ -4758,12 +4758,12 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             logger.error(
-                "[%s] Failed to send Telegram voice/audio, falling back to base adapter: %s",
+                "[%s] Failed to send Telegram voice/audio; not falling back to path-text delivery: %s",
                 self.name,
                 e,
                 exc_info=True,
             )
-            return await super().send_voice(chat_id, audio_path, caption, reply_to, metadata=metadata)
+            return SendResult(success=False, error=f"telegram_voice_send_failed: {type(e).__name__}: {e}", retryable=True)
 
     async def send_multiple_images(
         self,
@@ -5687,8 +5687,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 # Telegram emits /cmd@botname as one bot_command entity, not as
                 # a separate mention entity. Treat that suffix as an explicit
-                # bot address for exclusive multi-bot routing even when the
-                # group has require_mention/free-response disabled.
+                # bot address for exclusive multi-bot routing only when the
+                # command is actually used as the message/caption command. Do
+                # not let embedded prose examples like "use /help@OtherBot" in
+                # a long explanation suppress the whole message for this bot.
+                if source_text[:offset].strip():
+                    continue
                 at_index = entity_text.find("@")
                 if at_index < 0:
                     continue

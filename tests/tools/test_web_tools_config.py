@@ -384,12 +384,12 @@ class TestBackendSelection:
              patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test"}):
             assert _get_backend() == "firecrawl"
 
-    def test_fallback_no_keys_defaults_to_firecrawl(self):
-        """No keys, no config → 'firecrawl' (will fail at client init)."""
+    def test_fallback_no_keys_defaults_to_searxng(self):
+        """No keys, no config → 'searxng' for free/direct-search availability."""
         from tools.web_tools import _get_backend
         with patch("tools.web_tools._load_web_config", return_value={}), \
              patch("tools.web_tools._ddgs_package_importable", return_value=False):
-            assert _get_backend() == "firecrawl"
+            assert _get_backend() == "searxng"
 
     def test_invalid_config_falls_through_to_fallback(self):
         """web.backend=invalid → ignored, uses key-based fallback."""
@@ -568,6 +568,93 @@ class TestWebSearchErrorHandling:
         assert "traceback" not in result
 
 
+class TestWebExtractDirectFallback:
+    """Regression tests for free direct-HTTP fallback after paid extractor failures."""
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/html; charset=utf-8"}
+        text = "<html><head><title>Official Docs</title><script>bad()</script></head><body><h1>Bot-to-Bot Communication</h1><p>Official Telegram text.</p></body></html>"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            assert url == "https://core.telegram.org/bots/features"
+            return TestWebExtractDirectFallback.FakeResponse()
+
+    @pytest.mark.asyncio
+    async def test_direct_http_extract_backend_uses_free_fetch_without_provider_registry(self, monkeypatch):
+        import tools.web_tools
+
+        monkeypatch.setattr(tools.web_tools, "_get_extract_backend", lambda: "direct-http")
+        monkeypatch.setattr("tools.web_tools.async_is_safe_url", AsyncMock(return_value=True))
+        monkeypatch.setattr("tools.web_tools.check_auxiliary_model", lambda: False)
+        monkeypatch.setattr("tools.web_tools.httpx.AsyncClient", self.FakeAsyncClient)
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_provider",
+            lambda name: pytest.fail("direct-http should not touch the paid/provider registry"),
+        )
+
+        result = json.loads(await tools.web_tools.web_extract_tool(
+            ["https://core.telegram.org/bots/features"],
+            use_llm_processing=False,
+        ))
+
+        assert result["results"][0]["error"] is None
+        assert result["results"][0]["title"] == "Official Docs"
+        assert "Bot-to-Bot Communication" in result["results"][0]["content"]
+        assert "bad()" not in result["results"][0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_credit_failure_falls_back_to_direct_http_extract(self, monkeypatch):
+        import tools.web_tools
+
+        class FakeProvider:
+            name = "firecrawl"
+            display_name = "Firecrawl"
+
+            def supports_extract(self):
+                return True
+
+            async def extract(self, urls, format=None):
+                return [
+                    {
+                        "url": urls[0],
+                        "title": "",
+                        "content": "",
+                        "error": "Payment Required: Insufficient credits to perform this request.",
+                    }
+                ]
+
+        monkeypatch.setattr(tools.web_tools, "_get_extract_backend", lambda: "firecrawl")
+        monkeypatch.setattr(tools.web_tools, "_ensure_web_plugins_loaded", lambda: None)
+        monkeypatch.setattr("agent.web_search_registry.get_provider", lambda name: FakeProvider())
+        monkeypatch.setattr("tools.web_tools.async_is_safe_url", AsyncMock(return_value=True))
+        monkeypatch.setattr("tools.web_tools.check_auxiliary_model", lambda: False)
+        monkeypatch.setattr("tools.web_tools.httpx.AsyncClient", self.FakeAsyncClient)
+
+        result = json.loads(await tools.web_tools.web_extract_tool(
+            ["https://core.telegram.org/bots/features"],
+            use_llm_processing=False,
+        ))
+
+        assert result["results"][0]["error"] is None
+        assert result["results"][0]["title"] == "Official Docs"
+        assert "Bot-to-Bot Communication" in result["results"][0]["content"]
+        assert "bad()" not in result["results"][0]["content"]
+
+
 class TestCheckWebApiKey:
     """Test suite for check_web_api_key() unified availability check."""
 
@@ -624,10 +711,17 @@ class TestCheckWebApiKey:
             from tools.web_tools import check_web_api_key
             assert check_web_api_key() is True
 
-    def test_no_keys_returns_false(self):
+    def test_no_keys_returns_true_for_free_default_search(self):
         from tools.web_tools import check_web_api_key
-        with patch("tools.web_tools._ddgs_package_importable", return_value=False):
-            assert check_web_api_key() is False
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch("tools.web_tools._ddgs_package_importable", return_value=False):
+            assert check_web_api_key() is True
+
+    def test_direct_http_extract_backend_is_available_without_paid_keys(self):
+        from tools.web_tools import check_web_api_key
+        with patch("tools.web_tools._load_web_config", return_value={"extract_backend": "direct-http"}), \
+             patch("tools.web_tools._ddgs_package_importable", return_value=False):
+            assert check_web_api_key() is True
 
     def test_both_keys_returns_true(self):
         with patch.dict(os.environ, {
