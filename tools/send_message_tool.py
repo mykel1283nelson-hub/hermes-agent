@@ -573,13 +573,29 @@ def _describe_media_for_mirror(media_files):
 
 
 def _get_cron_auto_delivery_target():
-    """Return the cron scheduler's auto-delivery target for the current run, if any."""
+    """Return the cron scheduler's auto-delivery target for the current run, if any.
+
+    Cron auto-delivery metadata is process-level scheduler state, not per-message
+    gateway session state. Read the environment directly first so a cleared
+    session contextvar from another test/message cannot hide the scheduler's
+    duplicate-delivery guard.
+    """
     from gateway.session_context import get_session_env
-    platform = get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "").strip().lower()
-    chat_id = get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "").strip()
+
+    platform = (
+        os.getenv("HERMES_CRON_AUTO_DELIVER_PLATFORM")
+        or get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "")
+    ).strip().lower()
+    chat_id = (
+        os.getenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID")
+        or get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "")
+    ).strip()
     if not platform or not chat_id:
         return None
-    thread_id = get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID", "").strip() or None
+    thread_id = (
+        os.getenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID")
+        or get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID", "")
+    ).strip() or None
     return {
         "platform": platform,
         "chat_id": chat_id,
