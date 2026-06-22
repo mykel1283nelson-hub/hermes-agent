@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Patch spectrum-ts' iMessage inbound mapper until upstream preserves mixed
-// text + attachment Apple events. The current spectrum-ts mapper returns only
-// buildAttachmentMessage(...) whenever attachments are present, which drops
-// event.message.content.text before Hermes can see it.
+// Patch spectrum-ts' iMessage inbound mapper on old SDK layouts until upstream
+// preserves mixed text + attachment Apple events. Spectrum 5.x no longer exposes
+// the old internal chunks this patch targeted; when those chunks are absent on
+// a verified new major, the patch is treated as obsolete and skipped.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -100,6 +100,17 @@ function patchInbound(source) {
   return source;
 }
 
+function installedSpectrumMajor(root) {
+  const pkg = path.join(root, "node_modules", "spectrum-ts", "package.json");
+  try {
+    const data = JSON.parse(fs.readFileSync(pkg, "utf8"));
+    const major = Number(String(data.version || "").split(".")[0]);
+    return Number.isFinite(major) ? major : null;
+  } catch {
+    return null;
+  }
+}
+
 export function patchSpectrumTs(root = scriptDir()) {
   const dist = path.join(root, "node_modules", "spectrum-ts", "dist");
   if (!fs.existsSync(dist)) {
@@ -136,7 +147,11 @@ export function patchSpectrumTs(root = scriptDir()) {
     fs.writeFileSync(file, patched, "utf8");
     return { patched: true, file };
   }
-  throw new Error("could not find spectrum-ts iMessage inbound chunk to patch");
+  const major = installedSpectrumMajor(root);
+  if (major !== null && major >= 5) {
+    return { patched: false, file: dist, reason: `obsolete for spectrum-ts ${major}.x` };
+  }
+  throw new Error("could not find spectrum-ts iMessage inbound chunk");
 }
 
 const _invokedDirectly =
