@@ -560,6 +560,27 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
+    _web_preflight_context = ""
+    try:
+        from agent.web_preflight import run_mandatory_web_preflight
+
+        _web_preflight = run_mandatory_web_preflight(agent, user_message, turn_id=turn_id)
+        if isinstance(_web_preflight, dict):
+            setattr(agent, "_last_web_preflight", _web_preflight)
+            if _web_preflight.get("inject_context") and isinstance(_web_preflight.get("context"), str):
+                _web_preflight_context = _web_preflight["context"]
+            logger.info(
+                "mandatory_web_preflight status=%s ok=%s results=%s trace=%s session=%s turn=%s",
+                _web_preflight.get("status"),
+                _web_preflight.get("search_ok"),
+                _web_preflight.get("result_count"),
+                _web_preflight.get("trace_path"),
+                getattr(agent, "session_id", None) or "-",
+                turn_id,
+            )
+    except Exception as exc:  # noqa: BLE001 - preflight must not break local/private turns
+        logger.warning("mandatory_web_preflight failed open: %s", exc)
+
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
     final_response = None
@@ -752,6 +773,8 @@ def run_conversation(
                         _injections.append(_fenced)
                 if _plugin_user_context:
                     _injections.append(_plugin_user_context)
+                if _web_preflight_context:
+                    _injections.append(_web_preflight_context)
                 if _injections:
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
