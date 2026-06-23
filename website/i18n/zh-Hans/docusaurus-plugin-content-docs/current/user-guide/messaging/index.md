@@ -495,17 +495,13 @@ gateway:
 
 在嘈杂或低优先级的平台上禁用，同时在主要聊天上保持启用。无论有多少会话正在进行，每次重启只发送一次通知。
 
-### 网关重启后的会话恢复
+### Gateway restarts do not auto-replay sessions
 
-当网关在工具调用或生成进行中时关闭，受影响的会话被标记为 `restart_interrupted`。下次启动时，网关为每个会话安排自动恢复——用户在聊天中收到简短提示（"Send any message after restart and I'll try to resume where you left off."），当他们回复时，会话从最后提交的轮次继续。
+When the gateway restarts during an in-flight tool call or generation, Hermes does **not** synthesize a "gateway is back online" turn and does **not** replay the interrupted prompt. The user sends a fresh message after restart if they want the agent to continue.
 
-此行为默认开启，并在网关启动时记录日志：
+This avoids restart loops where an interrupted shutdown/restart command or long-running turn is repeatedly replayed after the gateway comes back.
 
-```
-Scheduled auto-resume for N restart-interrupted session(s)
-```
-
-无需配置。如果你不想要提示消息，在该平台上设置 `gateway_restart_notification: false`。
+Restart notifications are still controlled separately by `gateway_restart_notification` on each platform.
 
 ### 进度气泡清理（可选启用）
 

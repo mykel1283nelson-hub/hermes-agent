@@ -527,14 +527,10 @@ class SessionEntry:
     # Set by /stop to break stuck-resume loops (#7536).
     suspended: bool = False
 
-    # When True the session was interrupted by a gateway restart/shutdown
-    # drain timeout, but recovery is still expected.  Unlike ``suspended``,
-    # ``resume_pending`` preserves the existing session_id on next access —
-    # the user stays on the same transcript and the agent auto-continues
-    # from where it left off.  Cleared after the next successful turn.
-    # Escalation to ``suspended`` is handled by the existing
-    # ``.restart_failure_counts`` stuck-loop counter (#7536), not by a
-    # parallel counter on this entry.
+    # Deprecated compatibility fields.  Gateway restart auto-resume/replay is
+    # intentionally disabled: a restart-interrupted turn must not be replayed
+    # or wrapped in a synthetic "gateway is back online" prompt.  Existing
+    # persisted resume_pending=True entries are reset on next access.
     resume_pending: bool = False
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
@@ -998,24 +994,14 @@ class SessionStore:
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
 
-                # Auto-reset sessions marked as suspended (e.g. after /stop
-                # broke a stuck loop — #7536).  ``suspended`` is the hard
-                # forced-wipe signal and always wins over ``resume_pending``,
-                # so repeated interrupted restarts that escalate via the
-                # existing ``.restart_failure_counts`` stuck-loop counter
-                # still converge to a clean slate.
+                # Auto-reset sessions marked as suspended or left with the
+                # deprecated restart auto-resume flag.  Resume replay caused
+                # gateway restart loops; preserve transcript history in SQLite,
+                # but route the next user message to a fresh session.
                 if entry.suspended:
                     reset_reason = "suspended"
                 elif entry.resume_pending:
-                    # Restart-interrupted session: preserve the session_id
-                    # and return the existing entry so the transcript
-                    # reloads intact.  ``resume_pending`` is cleared after
-                    # the NEXT successful turn completes (not here), which
-                    # means a re-interrupted retry keeps trying — the
-                    # stuck-loop counter handles terminal escalation.
-                    entry.updated_at = now
-                    self._save()
-                    return entry
+                    reset_reason = "restart_resume_disabled"
                 else:
                     reset_reason = self._should_reset(entry, source)
                 if not reset_reason:
@@ -1110,28 +1096,7 @@ class SessionStore:
         session_key: str,
         reason: str = "restart_timeout",
     ) -> bool:
-        """Mark a session as resumable after a restart interruption.
-
-        Unlike ``suspend_session()``, this preserves the existing
-        ``session_id`` and the transcript.  The next call to
-        ``get_or_create_session()`` for this key returns the same entry
-        so the user auto-resumes on the same conversation lane.
-
-        Returns True if the session existed and was marked.
-        """
-        with self._lock:
-            self._ensure_loaded_locked()
-            if session_key in self._entries:
-                entry = self._entries[session_key]
-                # Never override an explicit ``suspended`` — that is a hard
-                # forced-wipe signal (from /stop or stuck-loop escalation).
-                if entry.suspended:
-                    return False
-                entry.resume_pending = True
-                entry.resume_reason = reason
-                entry.last_resume_marked_at = _now()
-                self._save()
-                return True
+        """Deprecated no-op: gateway restart auto-resume is disabled."""
         return False
 
     def clear_resume_pending(self, session_key: str) -> bool:
@@ -1212,40 +1177,8 @@ class SessionStore:
         return len(removed_keys)
 
     def suspend_recently_active(self, max_age_seconds: int = 120) -> int:
-        """Mark recently-active sessions as resumable after an unexpected exit.
-
-        Called on gateway startup after a crash or fast restart to preserve
-        in-flight sessions instead of destroying their conversation history
-        (#7536).  Only marks sessions updated within *max_age_seconds* to
-        avoid touching long-idle sessions.  Sets ``resume_pending=True`` so
-        the next incoming message on the same session_key auto-resumes from
-        the existing transcript.
-
-        Entries already flagged ``resume_pending=True`` are skipped.  Entries
-        explicitly ``suspended=True`` (from /stop or stuck-loop escalation)
-        are also skipped.  Terminal escalation for genuinely stuck sessions
-        is still handled by the existing ``.restart_failure_counts`` counter
-        (threshold 3), which runs after this method and sets ``suspended=True``.
-
-        Returns the number of sessions marked resumable.
-        """
-        from datetime import timedelta
-
-        cutoff = _now() - timedelta(seconds=max_age_seconds)
-        count = 0
-        with self._lock:
-            self._ensure_loaded_locked()
-            for entry in self._entries.values():
-                if entry.resume_pending:
-                    continue
-                if not entry.suspended and entry.updated_at >= cutoff:
-                    entry.resume_pending = True
-                    entry.resume_reason = "restart_interrupted"
-                    entry.last_resume_marked_at = _now()
-                    count += 1
-            if count:
-                self._save()
-        return count
+        """Deprecated no-op: do not mark sessions for restart auto-resume."""
+        return 0
 
     def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""

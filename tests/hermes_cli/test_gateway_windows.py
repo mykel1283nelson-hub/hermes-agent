@@ -694,19 +694,19 @@ def test_uninstall_access_denied_declined_keeps_task_and_cleans_files(monkeypatc
 # stop() drain semantics — issue #33778
 #
 # Background: on Windows, asyncio.add_signal_handler raises NotImplementedError,
-# so the gateway's SIGTERM handler (which drains in-flight agents and writes
-# resume_pending=True) never fires when `hermes gateway stop` kills the
-# process. The fix: stop() writes the planned_stop_marker first, waits for
-# the gateway's marker-watcher thread to drain + exit cleanly, then escalates
-# to taskkill if drain times out.
+# so the gateway's SIGTERM handler may never run when `hermes gateway stop`
+# kills the process. The fix: stop() writes the planned_stop_marker first,
+# waits for the gateway's marker-watcher thread to drain + exit cleanly, then
+# escalates to taskkill if drain times out. Restart auto-resume/replay is
+# disabled; this is graceful shutdown plumbing, not session replay plumbing.
 # ---------------------------------------------------------------------------
 
 
 def test_stop_writes_planned_stop_marker_before_killing(monkeypatch):
     """stop() must write the planned-stop marker BEFORE any kill signal.
 
-    Without this, the gateway's drain loop never runs on Windows and
-    sessions silently lose context across restarts.
+    Without this, the gateway's drain loop may never run on Windows and
+    resources may be killed without graceful cleanup.
     """
     pid = 99999
     events = []

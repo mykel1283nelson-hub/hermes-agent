@@ -218,19 +218,11 @@ class TestPlatformReconnectWatcher:
         assert Platform.TELEGRAM in runner.adapters
 
     @pytest.mark.asyncio
-    async def test_reconnect_retries_resume_pending_for_platform(self):
-        """A successful reconnect retries the startup auto-resume scoped to
-        that platform.
-
-        Regression: a platform offline at gateway startup had its
-        restart-interrupted sessions skipped by the one-shot startup pass and
-        never rescheduled, so the documented auto-resume silently dropped
-        until the user sent a fresh message. The watcher now re-runs the
-        platform-scoped auto-resume on reconnect.
-        """
+    async def test_reconnect_does_not_schedule_restart_auto_resume(self):
+        """A successful reconnect must not synthesize restart resume turns."""
         runner = _make_runner()
         runner._sync_voice_mode_state_to_adapter = MagicMock()
-        runner._schedule_resume_pending_sessions = MagicMock(return_value=1)
+        runner._schedule_resume_pending_sessions = MagicMock(return_value=0)
 
         platform_config = PlatformConfig(enabled=True, token="test")
         runner._failed_platforms[Platform.TELEGRAM] = {
@@ -261,9 +253,7 @@ class TestPlatformReconnectWatcher:
                 await run_one_iteration()
 
         assert Platform.TELEGRAM in runner.adapters
-        runner._schedule_resume_pending_sessions.assert_called_once_with(
-            platform=Platform.TELEGRAM
-        )
+        runner._schedule_resume_pending_sessions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_reconnect_nonretryable_removed_from_queue(self):

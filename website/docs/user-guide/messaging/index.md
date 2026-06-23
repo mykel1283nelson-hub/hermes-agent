@@ -565,17 +565,13 @@ gateway:
 
 Disable it on noisy or low-priority platforms while leaving it on for your primary chat. The notification is sent once per restart, regardless of how many sessions were in flight.
 
-### Session resume across gateway restarts
+### Gateway restarts do not auto-replay sessions
 
-When the gateway shuts down with an in-flight tool call or generation, the affected sessions are flagged as `restart_interrupted`. On the next startup, the gateway schedules an auto-resume for each one — the user gets a short heads-up in the chat ("Send any message after restart and I'll try to resume where you left off.") and the session picks up from the last committed turn when they reply.
+When the gateway restarts during an in-flight tool call or generation, Hermes does **not** synthesize a "gateway is back online" turn and does **not** replay the interrupted prompt. The user sends a fresh message after restart if they want the agent to continue.
 
-This behaviour is on by default and is logged at gateway start:
+This avoids restart loops where an interrupted shutdown/restart command or long-running turn is repeatedly replayed after the gateway comes back.
 
-```
-Scheduled auto-resume for N restart-interrupted session(s)
-```
-
-No configuration is required. If you don't want the heads-up, set `gateway_restart_notification: false` on the platform.
+Restart notifications are still controlled separately by `gateway_restart_notification` on each platform.
 
 ### Mobile-friendly progress defaults
 

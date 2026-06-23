@@ -1413,8 +1413,8 @@ def stop() -> None:
 
     # Phase 1: ask the running gateway (if any) to drain itself by writing
     # the planned-stop marker, then wait briefly for it to exit cleanly.
-    # On clean exit, sessions land with resume_pending=True and the next
-    # boot will auto-resume them.
+    # Restart auto-resume/replay is disabled; users send a fresh message after
+    # restart if continuation is desired.
     pid = get_running_pid()
     drained = False
     if pid is not None:

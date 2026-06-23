@@ -92,9 +92,9 @@ behavior on the next access.
 | `is_fresh_reset` | `bool` | `False` | Set by explicit `/new` or `/reset`. Triggers topic/channel skill re-injection on first message. Distinguished from `was_auto_reset` to avoid misleading "session expired" notices. |
 | `expiry_finalized` | `bool` | `False` | Set by background expiry watcher after invoking `on_session_finalize` hooks, cleaning tool resources, and evicting the cached agent. Prevents redundant finalization across restarts. |
 | `suspended` | `bool` | `False` | Hard force-wipe signal. Set by `/stop` or stuck-loop escalation (3+ consecutive restart failures). On next `get_or_create_session()`, forces a new `session_id` regardless of `resume_pending`. |
-| `resume_pending` | `bool` | `False` | Soft recovery marker. Set by `suspend_recently_active()` (crash recovery) or drain timeout. On next access, preserves the existing `session_id` — the user continues on the same transcript. Cleared after the next successful turn completes. |
-| `resume_reason` | `Optional[str]` | `None` | Why resume was marked: `"restart_timeout"`, `"shutdown_timeout"`, `"restart_interrupted"`. |
-| `last_resume_marked_at` | `Optional[datetime]` | `None` | Timestamp of the last resume-pending marking. |
+| `resume_pending` | `bool` | `False` | Deprecated compatibility field. Restart/shutdown auto-resume is disabled because replaying interrupted turns caused gateway loops. Legacy `resume_pending=True` entries force a fresh `session_id` on next access instead of replaying. |
+| `resume_reason` | `Optional[str]` | `None` | Deprecated reason field retained only for reading old `sessions.json` records. |
+| `last_resume_marked_at` | `Optional[datetime]` | `None` | Deprecated timestamp retained only for reading old `sessions.json` records. |
 
 ### State Transition Logic (get_or_create_session)
 
@@ -117,9 +117,9 @@ behavior on the next access.
                          │ No
                          ▼
               ┌──────────────────────┐
-              │ entry.resume_pending?│──── Yes ──► Return existing entry
-              └──────────┬───────────┘           (preserve session_id)
-                         │ No                     Clear flag on next successful turn
+              │ entry.resume_pending?│──── Yes ──► Auto-reset: new session_id
+              └──────────┬───────────┘           (reason="restart_resume_disabled")
+                         │ No
                          ▼
               ┌──────────────────────┐
               │   Policy says reset? │──── Yes ──► Auto-reset: new session_id
@@ -135,7 +135,7 @@ behavior on the next access.
 
 **Priority order in `get_or_create_session()`:**
 1. `suspended=True` → always force-reset (hard wipe)
-2. `resume_pending=True` → preserve session_id (soft recovery)
+2. `resume_pending=True` → force-reset (restart auto-resume disabled)
 3. Policy expiry (idle/daily) → auto-reset
 4. No trigger → return existing entry (bump `updated_at`)
 
@@ -167,9 +167,9 @@ SessionStore(sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=
 | `reset_session(session_key, display_name=None)` | Explicit reset (from `/new` or `/reset`). Creates new `session_id`, sets `is_fresh_reset=True`. Ends old SQLite session, creates new one. |
 | `switch_session(session_key, target_session_id)` | Switch to a different existing session ID (from `/resume`). Ends current SQLite session, reopens target. |
 | `suspend_session(session_key)` | Mark session as `suspended=True` (from `/stop`). Forces auto-reset on next access. |
-| `mark_resume_pending(session_key, reason)` | Mark session as `resume_pending=True` (from drain timeout). Preserves session_id on next access. Will NOT override `suspended=True`. |
-| `clear_resume_pending(session_key)` | Clear `resume_pending` after a successful resumed turn. Called from gateway after `run_conversation()` returns. |
-| `suspend_recently_active(max_age_seconds=120)` | Crash recovery: mark recently-active sessions as `resume_pending=True`. Skips already-pending and already-suspended entries. Called on startup after unclean shutdown. |
+| `mark_resume_pending(session_key, reason)` | Deprecated no-op. Restart auto-resume/replay is disabled. |
+| `clear_resume_pending(session_key)` | Compatibility cleanup for old records; clears deprecated `resume_pending` metadata if present. |
+| `suspend_recently_active(max_age_seconds=120)` | Deprecated no-op. Startup crash recovery no longer marks sessions for replay. |
 | `prune_old_entries(max_age_days)` | Drop entries older than `max_age_days` (based on `updated_at`). Skips `suspended` entries and sessions with active processes. |
 | `list_sessions(active_minutes=None)` | Return all sessions, optionally filtered by recent activity. Sorted by `updated_at` descending. |
 | `lookup_by_session_id(session_id)` | Find the active `SessionEntry` for a persisted session ID. |
@@ -360,8 +360,8 @@ Gateway starts
        │ Missing
        ▼
 ┌───────────────────────────────┐
-│ session_store                 │── Marks sessions updated within
-│ .suspend_recently_active()    │   last 120 seconds as resume_pending
+│ session_store                 │── No-op: restart auto-resume disabled
+│ .suspend_recently_active()    │   (no resume_pending marks)
 └───────────────────────────────┘
        │
        ▼
@@ -379,23 +379,18 @@ Gateway starts
        │
        ▼
 ┌───────────────────────────────┐
-│ For each adapter, find        │
-│ resume_pending sessions →     │
-│ synthesize MessageEvent and   │
-│ run _handle_message to let    │
-│ the agent auto-continue       │
+│ No synthetic resume events.   │
+│ User/operator sends a fresh   │
+│ message after restart if      │
+│ continuation is desired.      │
 └───────────────────────────────┘
 ```
 
 ### suspend_recently_active(max_age_seconds=120)
 
-Called on gateway startup when no `.clean_shutdown` marker exists (indicating a crash or
-unexpected exit). For each session updated within the last 120 seconds:
-
-- Sets `resume_pending=True`, `resume_reason="restart_interrupted"`,
-  `last_resume_marked_at=now`.
-- Skips entries already `resume_pending=True` (no double-mark).
-- Skips entries explicitly `suspended=True` (hard wipe should stay).
+Deprecated no-op. It intentionally does not mark sessions for auto-resume after
+crash or restart. This prevents fake "gateway is back online" continuation turns
+from replaying the interrupted prompt and creating restart loops.
 
 ### Stuck-Loop Detection (`_suspend_stuck_loop_sessions`)
 
@@ -405,27 +400,15 @@ gets a clean slate.
 
 ### Drain-Timeout Marking
 
-On graceful shutdown/restart, the drain system calls `mark_resume_pending()` for any
-session that was mid-turn when the drain timeout fired. Reasons:
-
-- `"restart_timeout"` — killed during restart drain
-- `"shutdown_timeout"` — killed during shutdown drain
-- `"restart_interrupted"` — crash recovery (from `suspend_recently_active`)
-
-All three reasons are in `_AUTO_RESUME_REASONS` and eligible for startup auto-resume.
+On graceful shutdown/restart, the drain system does not mark sessions for replay.
+Interrupted work is interrupted; the operator sends a new prompt after restart if
+continuation is desired.
 
 ### Auto-Resume on Next Access
 
-When `get_or_create_session()` encounters `resume_pending=True`:
-
-1. It returns the existing entry **without** creating a new `session_id`.
-2. The existing transcript is loaded intact.
-3. The marking is not cleared here — it survives until the next successful turn
-   completes (`clear_resume_pending()` is called from the gateway after
-   `run_conversation()` returns a real response).
-4. If the resumed turn is interrupted again, the `resume_pending` flag remains set,
-   and the next restart will retry. The stuck-loop counter handles terminal escalation
-   (3 retries → suspended).
+Auto-resume is disabled. When `get_or_create_session()` encounters a legacy
+`resume_pending=True` record, it creates a fresh `session_id` with
+`auto_reset_reason="restart_resume_disabled"` instead of replaying the old turn.
 
 ### Clean Shutdown Marker (`.clean_shutdown`)
 
