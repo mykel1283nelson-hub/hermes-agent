@@ -1151,8 +1151,22 @@ class TestTelegramMenuCommands:
             "new",
             "stop",
             "status",
+            "goal",
+            "subgoal",
         ):
             assert name in names
+
+    def test_goal_commands_are_visible_before_menu_cap(self, tmp_path, monkeypatch):
+        """Persistent-goal commands must survive Telegram's visible menu cap."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        menu, _hidden = telegram_menu_commands(max_commands=30)
+        names = [name for name, _desc in menu]
+
+        assert "goal" in names
+        assert "subgoal" in names
+        assert names.index("goal") < 30
+        assert names.index("subgoal") < 30
 
     def test_includes_plugin_commands_via_lazy_discovery(self, tmp_path, monkeypatch):
         """Telegram menu generation should discover plugin slash commands on first access."""
