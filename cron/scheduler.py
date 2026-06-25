@@ -1783,8 +1783,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     agent = None
 
     # Mark this as a cron session so the approval system can apply cron_mode.
-    # This env var is process-wide and persists for the lifetime of the
-    # scheduler process — every job this process runs is a cron job.
+    # Scope the process-global env var to this run only: the gateway and
+    # scheduler can share one process, and leaking this marker into later live
+    # Telegram/API turns makes routine execute_code falsely look like cron.
+    _prior_cron_session_env = os.environ.get("HERMES_CRON_SESSION", "_UNSET_")
     os.environ["HERMES_CRON_SESSION"] = "1"
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
@@ -2260,6 +2262,16 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 os.environ.pop("TERMINAL_CWD", None)
             else:
                 os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
+        # Restore the process-global cron marker so cron runs do not poison
+        # subsequent live gateway/API turns in the same process.  If this
+        # scheduler is hosted by the gateway, never preserve a pre-existing
+        # cron marker: that value is already leaked/poisoned for live turns.
+        if os.getenv("_HERMES_GATEWAY") or os.getenv("HERMES_GATEWAY_SESSION"):
+            os.environ.pop("HERMES_CRON_SESSION", None)
+        elif _prior_cron_session_env == "_UNSET_":
+            os.environ.pop("HERMES_CRON_SESSION", None)
+        else:
+            os.environ["HERMES_CRON_SESSION"] = _prior_cron_session_env
         # Clean up ContextVar session/delivery state for this job.
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:

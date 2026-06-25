@@ -1000,6 +1000,112 @@ class TestRunJobSessionPersistence:
         fake_db.close.assert_called_once()
         mock_agent.close.assert_called_once()
 
+    def test_run_job_clears_cron_session_env_after_agent_run(self, tmp_path, monkeypatch):
+        """Cron markers must not leak into later live gateway turns in the same process."""
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+        job = {
+            "id": "env-job",
+            "name": "env",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, _final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert os.environ.get("HERMES_CRON_SESSION") is None
+
+    def test_run_job_clears_poisoned_cron_env_when_hosted_by_gateway(self, tmp_path, monkeypatch):
+        """A stale cron marker in the gateway host must be treated as poison, not restored."""
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        monkeypatch.setenv("_HERMES_GATEWAY", "1")
+        job = {
+            "id": "gateway-env-job",
+            "name": "gateway env",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, _final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert os.environ.get("HERMES_CRON_SESSION") is None
+
+    def test_run_job_preserves_external_cron_marker_outside_gateway(self, tmp_path, monkeypatch):
+        """A true non-gateway cron host may keep its parent cron marker."""
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        job = {
+            "id": "external-cron-job",
+            "name": "external cron",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, _final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert os.environ.get("HERMES_CRON_SESSION") == "1"
+
     def test_run_job_titles_cron_session_from_job_not_important_hint(self, tmp_path):
         # The cron session's first message is the injected "[IMPORTANT: …]"
         # hint, which used to surface as the sidebar/history row label. run_job

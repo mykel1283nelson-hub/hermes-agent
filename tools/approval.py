@@ -146,11 +146,13 @@ def _is_gateway_approval_context() -> bool:
     fall through to the gateway branch would submit a pending approval
     with no listener and block the job indefinitely.
     """
-    if env_var_enabled("HERMES_CRON_SESSION"):
-        return False
     if env_var_enabled("HERMES_GATEWAY_SESSION"):
         return True
-    return bool(_get_session_platform())
+    if _get_session_platform():
+        return True
+    if env_var_enabled("HERMES_CRON_SESSION"):
+        return False
+    return False
 
 # Sensitive write targets that should trigger approval even when referenced
 # via shell expansions like $HOME or $HERMES_HOME, or by the resolved absolute
@@ -1805,8 +1807,10 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
-    # Cron: no user is present to approve arbitrary code.
-    if env_var_enabled("HERMES_CRON_SESSION"):
+    # Cron: no user is present to approve arbitrary code.  This branch must
+    # come after gateway/ask detection so a leaked process-global cron marker
+    # cannot override a live operator approval surface.
+    if not is_gateway and not is_ask and env_var_enabled("HERMES_CRON_SESSION"):
         if _get_cron_approval_mode() == "deny":
             return {
                 "approved": False,

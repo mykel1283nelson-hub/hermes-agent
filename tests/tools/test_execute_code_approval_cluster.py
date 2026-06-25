@@ -167,6 +167,15 @@ def test_guard_cron_deny_blocks(monkeypatch):
     assert res["outcome"] == "blocked"
 
 
+def test_guard_gateway_session_wins_over_leaked_cron_marker(gw_session, monkeypatch):
+    """A stale process-global cron marker must not make a live gateway turn look unattended."""
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    _register_resolver(gw_session, "once")
+    res = A.check_execute_code_guard("import os; print(1)", "local")
+    assert res["approved"] is True
+    assert res.get("outcome") != "blocked"
+
+
 def test_guard_gateway_user_approves_is_one_shot(gw_session):
     _register_resolver(gw_session, "once")
     res = A.check_execute_code_guard("import os; print(1)", "local")
