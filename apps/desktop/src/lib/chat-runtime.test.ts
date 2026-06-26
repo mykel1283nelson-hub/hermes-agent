@@ -6,7 +6,8 @@ import {
   attachmentDisplayText,
   coerceThinkingText,
   optimisticAttachmentRef,
-  parseCommandDispatch
+  parseCommandDispatch,
+  parseSlashCommand
 } from './chat-runtime'
 
 const DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANS'
@@ -109,5 +110,28 @@ describe('parseCommandDispatch', () => {
 
   it('rejects a prefill directive missing its message', () => {
     expect(parseCommandDispatch({ type: 'prefill', notice: 'x' })).toBeNull()
+  })
+})
+
+describe('parseSlashCommand', () => {
+  it('parses a bare command with no argument', () => {
+    expect(parseSlashCommand('/goal')).toEqual({ name: 'goal', arg: '' })
+  })
+
+  it('parses a single-line argument', () => {
+    expect(parseSlashCommand('/goal fix this')).toEqual({ name: 'goal', arg: 'fix this' })
+  })
+
+  it('parses a multi-line argument (regression: previously returned an empty name)', () => {
+    const input = '/goal Details below.\nline two\nline three'
+
+    expect(parseSlashCommand(input)).toEqual({
+      name: 'goal',
+      arg: 'Details below.\nline two\nline three',
+    })
+  })
+
+  it('returns an empty name for slash-only input', () => {
+    expect(parseSlashCommand('/')).toEqual({ name: '', arg: '' })
   })
 })
