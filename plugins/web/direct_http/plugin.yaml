@@ -1,0 +1,7 @@
+name: web-direct-http
+version: 1.0.0
+description: "Direct HTTP content extraction for public pages — no API key required. Intended for web.extract_backend."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - direct-http

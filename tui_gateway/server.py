@@ -12723,6 +12723,14 @@ def _(rid, params: dict) -> dict:
         # persisted stale toggle.
         os.environ["HERMES_VOICE"] = "1" if enabled else "0"
 
+        if enabled:
+            # Desktop/TUI parity with classic CLI: ``voice.auto_tts`` should
+            # make replies spoken immediately after /voice on, without a
+            # second /voice tts toggle.  Keep the flag runtime-only so a
+            # future launch still starts with voice off.
+            auto_tts = _voice_cfg_dict().get("auto_tts") is True
+            os.environ["HERMES_VOICE_TTS"] = "1" if auto_tts else "0"
+
         if not enabled:
             # Disabling the mode must tear the continuous loop down; the
             # loop holds the microphone and would otherwise keep running.

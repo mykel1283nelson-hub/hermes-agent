@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from agent.web_search_provider import WebSearchProvider
@@ -122,8 +121,12 @@ Firecrawl = _FirecrawlProxy()
 
 def _get_direct_firecrawl_config() -> Optional[tuple]:
     """Return explicit direct Firecrawl kwargs + cache key, or None when unset."""
-    api_key = os.getenv("FIRECRAWL_API_KEY", "").strip()
-    api_url = os.getenv("FIRECRAWL_API_URL", "").strip().rstrip("/")
+    # Resolve via tools.web_tools._env_value so config/.env/keychain-backed
+    # Hermes values are honored, not only process-level exports.
+    import tools.web_tools as _wt
+
+    api_key = _wt._env_value("FIRECRAWL_API_KEY")
+    api_url = _wt._env_value("FIRECRAWL_API_URL").rstrip("/")
 
     if not api_key and not api_url:
         return None

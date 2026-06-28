@@ -137,23 +137,26 @@ def _load_web_config() -> dict:
         return {}
 
 def _get_backend() -> str:
-    """Determine which web backend to use (shared fallback).
+    """Determine which search-capable web backend to use (shared fallback).
 
     Reads ``web.backend`` from config.yaml (set by ``hermes tools``).
     Falls back to whichever API key is present for users who configured
     keys manually without running setup.
+
+    Extract-only providers such as ``direct-http`` are intentionally not
+    selected here; ``_get_capability_backend('extract')`` handles them.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
     if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
-    # available backend. Explicit user credentials (TAVILY_API_KEY etc.)
-    # beat the managed-tool-gateway probe so a deliberate setup is not
-    # pre-empted by a Nous OAuth token whose subscription tier may not
-    # actually grant web-search access (the gateway then fails at runtime
-    # with "no subscription" and the tool returns an error to the agent
-    # without falling back). Free-tier backends trail the paid ones.
+    # available search-capable backend. Explicit user credentials
+    # (TAVILY_API_KEY etc.) beat the managed-tool-gateway probe so a
+    # deliberate setup is not pre-empted by a Nous OAuth token whose
+    # subscription tier may not actually grant web-search access (the
+    # gateway then fails at runtime and the tool returns an error to the
+    # agent without falling back). Free-tier backends trail the paid ones.
     backend_candidates = (
         ("tavily", _has_env("TAVILY_API_KEY")),
         ("exa", _has_env("EXA_API_KEY")),
@@ -169,7 +172,6 @@ def _get_backend() -> str:
             return backend
 
     return "firecrawl"  # default (backward compat)
-
 
 def _get_search_backend() -> str:
     """Determine which backend to use for web_search specifically.
@@ -199,13 +201,20 @@ def _get_extract_backend() -> str:
 def _get_capability_backend(capability: str) -> str:
     """Shared helper for per-capability backend selection.
 
-    Reads ``web.{capability}_backend`` from config; if set and available,
-    uses it. Otherwise falls through to the shared ``_get_backend()``.
+    Reads ``web.{capability}_backend`` from config; if set and the provider
+    supports that capability, uses it. Otherwise falls through to a shared
+    ``web.backend`` only when it supports the requested capability, then to
+    search-capable auto-detection/default behavior.
     """
     cfg = _load_web_config()
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
-    if specific and _is_backend_available(specific):
+    if specific and _backend_supports_capability(specific, capability):
         return specific
+
+    shared = (cfg.get("backend") or "").lower().strip()
+    if shared and _backend_supports_capability(shared, capability):
+        return shared
+
     return _get_backend()
 
 
@@ -219,6 +228,8 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "direct-http":
+        return True
     if backend == "searxng":
         return _has_env("SEARXNG_URL")
     if backend == "brave-free":
@@ -859,16 +870,45 @@ async def web_extract_tool(
         return tool_error(error_msg)
 
 
-# Convenience function to check Firecrawl credentials
+_KNOWN_WEB_BACKENDS = ("exa", "parallel", "firecrawl", "tavily", "direct-http", "searxng", "brave-free", "ddgs", "xai")
+
+
+def _backend_supports_capability(backend: str, capability: str) -> bool:
+    """Return whether a configured, available backend supports a capability."""
+    if not backend or not _is_backend_available(backend):
+        return False
+    try:
+        _ensure_web_plugins_loaded()
+        from agent.web_search_registry import get_provider
+
+        provider = get_provider(backend)
+        if provider is None:
+            return False
+        if capability == "search":
+            return bool(provider.supports_search())
+        if capability == "extract":
+            return bool(provider.supports_extract())
+    except Exception:
+        logger.debug("Could not inspect web provider capability for %s", backend, exc_info=True)
+    return False
+
+
+def check_web_search_available() -> bool:
+    """Check whether native web_search has an available search-capable backend."""
+    backend = _get_search_backend()
+    return _backend_supports_capability(backend, "search") and _is_backend_available(backend)
+
+
+def check_web_extract_available() -> bool:
+    """Check whether native web_extract has an available extract-capable backend."""
+    backend = _get_extract_backend()
+    return _backend_supports_capability(backend, "extract") and _is_backend_available(backend)
+
+
+# Convenience function to check configured web credentials/capabilities.
 def check_web_api_key() -> bool:
-    """Check whether the configured web backend is available."""
-    configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai"}:
-        return _is_backend_available(configured)
-    return any(
-        _is_backend_available(backend)
-        for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai")
-    )
+    """Check whether any configured native web capability is available."""
+    return check_web_search_available() or check_web_extract_available()
 
 
 if __name__ == "__main__":
@@ -1001,7 +1041,7 @@ registry.register(
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
-    check_fn=check_web_api_key,
+    check_fn=check_web_search_available,
     requires_env=_web_requires_env(),
     emoji="🔍",
     max_result_size_chars=100_000,
@@ -1015,7 +1055,7 @@ registry.register(
         "markdown",
         char_limit=args.get("char_limit"),
     ),
-    check_fn=check_web_api_key,
+    check_fn=check_web_extract_available,
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",

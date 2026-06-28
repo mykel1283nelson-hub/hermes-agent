@@ -433,6 +433,35 @@ def test_voice_toggle_returns_configured_record_key(monkeypatch):
     assert status_resp["result"]["record_key"] == "ctrl+o"
 
 
+def test_voice_toggle_on_honors_auto_tts(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"voice": {"record_key": "ctrl+b", "auto_tts": True}},
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.voice_mode",
+        types.SimpleNamespace(
+            check_voice_requirements=lambda: {"available": True, "details": ""}
+        ),
+    )
+    monkeypatch.setenv("HERMES_VOICE", "0")
+    monkeypatch.setenv("HERMES_VOICE_TTS", "0")
+
+    on_resp = server.dispatch(
+        {"id": "voice-on", "method": "voice.toggle", "params": {"action": "on"}}
+    )
+    status_resp = server.dispatch(
+        {"id": "voice-status", "method": "voice.toggle", "params": {"action": "status"}}
+    )
+
+    assert on_resp is not None
+    assert status_resp is not None
+    assert on_resp["result"]["tts"] is True
+    assert status_resp["result"]["tts"] is True
+
+
 def test_voice_toggle_handles_non_dict_voice_cfg(monkeypatch):
     """Round-3 Copilot review regression on #19835.
 
@@ -6626,6 +6655,7 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
     )
     assert any(
         "No supported Chromium-family browser executable was found" in line
+        or "Start a Chromium-family browser with remote debugging" in line
         for line in resp["result"]["messages"]
     )
     assert any(

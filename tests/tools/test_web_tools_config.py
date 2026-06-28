@@ -14,7 +14,7 @@ import os
 import sys
 import types
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 
 class TestFirecrawlClientConfig:
@@ -70,6 +70,22 @@ class TestFirecrawlClientConfig:
                 from tools.web_tools import _get_firecrawl_client
                 with pytest.raises(ValueError, match="FIRECRAWL_API_KEY"):
                     _get_firecrawl_client()
+
+    def test_config_backed_firecrawl_key_initializes_direct_client(self):
+        """Firecrawl must honor Hermes config/keychain values, not only process env."""
+        def fake_env_value(key):
+            return {
+                "FIRECRAWL_API_KEY": "fc-config-key",
+                "FIRECRAWL_API_URL": "",
+            }.get(key, "")
+
+        with patch("tools.web_tools._env_value", side_effect=fake_env_value):
+            with patch("tools.web_tools.prefers_gateway", return_value=False):
+                with patch("tools.web_tools.Firecrawl") as mock_fc:
+                    from tools.web_tools import _get_firecrawl_client
+                    result = _get_firecrawl_client()
+                    mock_fc.assert_called_once_with(api_key="fc-config-key")
+                    assert result is mock_fc.return_value
 
     def test_tool_gateway_domain_builds_firecrawl_gateway_origin(self):
         """Shared gateway domain should derive the Firecrawl vendor hostname."""
@@ -347,7 +363,9 @@ class TestBackendSelection:
         """No keys, no config → 'firecrawl' (will fail at client init)."""
         from tools.web_tools import _get_backend
         with patch("tools.web_tools._load_web_config", return_value={}), \
-             patch("tools.web_tools._ddgs_package_importable", return_value=False):
+             patch("tools.web_tools._ddgs_package_importable", return_value=False), \
+             patch("tools.web_tools._has_env", return_value=False), \
+             patch("tools.web_tools._is_tool_gateway_ready", return_value=False):
             assert _get_backend() == "firecrawl"
 
     def test_invalid_config_falls_through_to_fallback(self):
@@ -585,7 +603,11 @@ class TestCheckWebApiKey:
 
     def test_no_keys_returns_false(self):
         from tools.web_tools import check_web_api_key
-        with patch("tools.web_tools._ddgs_package_importable", return_value=False):
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch("tools.web_tools._ddgs_package_importable", return_value=False), \
+             patch("tools.web_tools._has_env", return_value=False), \
+             patch("tools.web_tools._is_tool_gateway_ready", return_value=False), \
+             patch("tools.web_tools.check_firecrawl_api_key", return_value=False):
             assert check_web_api_key() is False
 
     def test_both_keys_returns_true(self):

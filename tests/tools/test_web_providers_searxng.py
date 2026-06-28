@@ -328,6 +328,41 @@ class TestCheckWebApiKey:
         assert web_tools.check_web_api_key() is False
 
 
+class TestPerCapabilityToolAvailability:
+    def test_search_tool_exposed_when_search_backend_available_even_if_shared_backend_unavailable(self, monkeypatch):
+        """A search-capable override must expose web_search even if web.backend is unavailable.
+
+        Regression for a TUI/Desktop schema failure: config had
+        ``web.backend: ddgs`` with ddgs not installed, but
+        ``web.search_backend: searxng`` was usable. The old shared
+        ``check_web_api_key`` hid both native web tools, so the agent lost
+        web_search despite having a working SearXNG route.
+        """
+        from model_tools import _clear_tool_defs_cache, get_tool_definitions
+        from tools import web_tools
+        from tools.registry import invalidate_check_fn_cache
+
+        monkeypatch.setattr(
+            web_tools,
+            "_load_web_config",
+            lambda: {"backend": "ddgs", "search_backend": "searxng"},
+        )
+        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
+        monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
+        monkeypatch.setattr(web_tools, "check_firecrawl_api_key", lambda: False)
+
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+        tool_defs = get_tool_definitions(enabled_toolsets=["web"], quiet_mode=True)
+        names = {td["function"]["name"] for td in tool_defs}
+
+        assert web_tools.check_web_search_available() is True
+        assert web_tools.check_web_extract_available() is False
+        assert "web_search" in names
+        assert "web_extract" not in names
+
+
 # ---------------------------------------------------------------------------
 # searxng-only: web_extract returns a clear error
 # ---------------------------------------------------------------------------

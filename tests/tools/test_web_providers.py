@@ -157,6 +157,37 @@ class TestPerCapabilityBackendSelection:
         monkeypatch.setenv("EXA_API_KEY", "test-key")
         assert web_tools._get_extract_backend() == "exa"
 
+    def test_direct_http_extract_backend_is_available_without_api_key(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
+            "backend": "ddgs",
+            "extract_backend": "direct-http",
+        })
+        assert web_tools._get_extract_backend() == "direct-http"
+        assert web_tools.check_web_extract_available() is True
+
+    def test_direct_http_is_not_generic_search_fallback(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        for k in (
+            "BRAVE_SEARCH_API_KEY",
+            "SEARXNG_URL",
+            "TAVILY_API_KEY",
+            "EXA_API_KEY",
+            "PARALLEL_API_KEY",
+            "FIRECRAWL_API_KEY",
+            "FIRECRAWL_API_URL",
+            "FIRECRAWL_GATEWAY_URL",
+            "TOOL_GATEWAY_DOMAIN",
+        ):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
+
+        assert web_tools._get_search_backend() == "firecrawl"
+        assert web_tools.check_web_search_available() is False
+
     def test_falls_back_to_generic_backend_when_search_backend_empty(self, monkeypatch):
         from tools import web_tools
 
